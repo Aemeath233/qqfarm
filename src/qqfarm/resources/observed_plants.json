@@ -1,0 +1,13 @@
+{
+  "source": "本账号 2026-10-11 Plant 成功回包及种子库存变动；只记录已观察到的属性",
+  "plants": [
+    {"seed_id":21032,"plant_id":1021032,"name":"琉璃宝荷","fruit_id":41032,"plot_size":2,"inventory_only":true,"supported_land_levels":[5]},
+    {"seed_id":29004,"plant_id":1029004,"name":"泡泡棉花糖","fruit_id":49004,"plot_size":2,"inventory_only":true,"supported_land_levels":[5]}
+  ],
+  "items": [
+    {"id":21032,"name":"琉璃宝荷种子","type":5,"base_sell_price":0},
+    {"id":29004,"name":"泡泡棉花糖种子","type":5,"base_sell_price":0},
+    {"id":41032,"name":"琉璃宝荷","type":6,"base_sell_price":0,"sell_verified":false},
+    {"id":49004,"name":"泡泡棉花糖","type":6,"base_sell_price":0,"sell_verified":true}
+  ]
+}

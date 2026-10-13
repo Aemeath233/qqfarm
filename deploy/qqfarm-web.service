@@ -1,0 +1,24 @@
+[Unit]
+Description=Personal QQ Farm Web Controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqfarm
+Group=qqfarm
+WorkingDirectory=/opt/qqfarm
+EnvironmentFile=-/etc/qqfarm/qqfarm.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/qqfarm/.venv/bin/qqfarm-web --data-dir /var/lib/qqfarm
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qqfarm
+
+[Install]
+WantedBy=multi-user.target
