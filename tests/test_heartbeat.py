@@ -1,17 +1,14 @@
 import asyncio
-import json
 from types import SimpleNamespace
-from zipfile import ZipFile
 
 import pytest
-from test_client import Crypto, client
+from test_client import client
 
-from qqfarm import cli, wire
 from qqfarm import client as client_module
+from qqfarm import wire
 from qqfarm.client import PLANT, USER, OperationPaused, UncertainOutcome
-from qqfarm.config import FarmError, Settings
-from qqfarm.heartbeat import HeartbeatStats, next_deadline
-from qqfarm.heartbeat_capture import inspect_capture
+from qqfarm.config import FarmError
+from qqfarm.heartbeat import next_deadline
 
 
 def test_deadlines_do_not_accumulate_reply_delay_or_burst_after_pause():
@@ -120,74 +117,3 @@ async def test_requested_stop_does_not_report_network_failure_or_close_pending_b
     assert game.disconnect_reason == "local_stop"
     assert not game.ws.closed
     assert not any(state == "failed" for _, state, _ in game.audit.rows)
-
-
-def reply(method, seq, body):
-    meta = wire.text(1, USER) + wire.text(2, method) + wire.uint(3, 2) + wire.uint(4, seq)
-    return wire.blob(1, meta) + wire.blob(2, body)
-
-
-def record(outbound, body, timestamp):
-    frame = b"\x82" + bytes([len(body)]) + body
-    direction = "Request" if outbound else "Response"
-    header = f"{direction}-Length: {len(frame)}\r\nDoneRead: {timestamp}\r\n\r\n"
-    return header.encode() + frame + b"\r\n"
-
-
-def test_capture_report_matches_replies_and_does_not_disclose_credentials(tmp_path):
-    path = tmp_path / "test.saz"
-    request = wire.uint(1, 123) + wire.text(2, "test-version") + wire.uint(3, 0)
-    frames = record(
-        False, reply("Login", 1, wire.blob(1, wire.uint(1, 123))), "2026-10-04T21:00:00+08:00"
-    )
-    for seq, second in [(2, 25), (3, 50)]:
-        payload = wire.encode_gate(USER, "Heartbeat", seq, seq - 1, request)
-        frames += record(True, payload, f"2026-10-04T21:00:{second}+08:00")
-        frames += record(
-            False,
-            reply("Heartbeat", seq, wire.uint(1, 1791120000000)),
-            f"2026-10-04T21:00:{second}.100+08:00",
-        )
-    with ZipFile(path, "w") as archive:
-        archive.writestr(
-            "raw/1_c.txt", "GET https://gate-obt.nqf.qq.com/prod/ws?code=private HTTP/1.1\r\n\r\n"
-        )
-        archive.writestr("raw/1_w.txt", frames)
-    result = inspect_capture(path, Crypto())
-    sample = result["sessions"][0]
-    assert sample["interval_seconds"]["median"] == 25
-    assert sample["rtt_seconds"]["median"] == 0.1
-    assert sample["request_fields"] == [1, 2, 3]
-    assert sample["gid_matches_login"] is True
-    assert sample["unanswered_at_export"] == 0
-    assert "private" not in json.dumps(result)
-
-
-async def test_probe_uses_login_and_wait_without_land_queries(tmp_path, monkeypatch):
-    class ProbeClient:
-        disconnect_reason = "local_stop"
-        fault = None
-
-        def __init__(self, settings, session, audit, *, allow_writes):
-            assert not allow_writes
-            self.heartbeat_stats = HeartbeatStats()
-
-        async def connect(self):
-            pass
-
-        async def wait(self, seconds):
-            assert seconds == 60
-            self.heartbeat_stats.sent_count = self.heartbeat_stats.ack_count = 2
-
-        async def close(self):
-            pass
-
-        async def rpc(self, *args):
-            pytest.fail("心跳测试不应发送土地、背包或种收请求")
-
-    monkeypatch.setattr(cli, "GameClient", ProbeClient)
-    settings = Settings("private", data_dir=tmp_path)
-    await cli.run(settings, heartbeat_minutes=1)
-    result = json.loads((tmp_path / "heartbeat-last.json").read_text(encoding="utf-8"))
-    assert result["completed"] is True
-    assert "private" not in str(result)

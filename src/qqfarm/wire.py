@@ -117,5 +117,6 @@ def decode_gate(payload):
         "seq": number(meta, 4),
         "server_seq": number(meta, 5),
         "error": number(meta, 6),
+        "error_message": string(meta, 7),
         "body": data(outer, 2),
     }

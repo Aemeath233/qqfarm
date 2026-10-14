@@ -2,7 +2,9 @@
 
 一个单账号的 QQ 农场挂机工具，使用浏览器操作。可以在自己的电脑运行，也可以部署在服务器上；不需要额外安装桌面客户端。
 
-后端使用 Python / FastAPI，前端使用 Vue 3。当前版本：**0.6.1**。
+后端使用 Python / FastAPI，前端使用 Vue 3。当前版本：**0.6.2**。
+
+**自动种菜、收获和好友互动需要程序持续运行，并保持联网。** 网页只是控制面板，关掉网页不会停止挂机；关闭程序、关闭启动它的终端、关机或休眠都会中断。本机运行适合体验；如果你有服务器，推荐部署到服务器，用后台服务保持运行，就不用一直开着自己的电脑。
 
 ## 快速使用
 
@@ -19,11 +21,24 @@ uv 会按项目要求准备 Python 3.12 和依赖。仓库已包含构建好的�
 
 1. 打开 **<http://127.0.0.1:8790>**。
 2. 从 `data/server/initial-password.txt` 读取首次生成的管理密码，登录网页。
-3. 用 Fiddler 开启 HTTPS 解密，打开 QQ 农场小程序，成功进入农场后关闭小程序，导出包含完整登录记录的 `.saz` 文件。
+3. 按下面的步骤，用 Fiddler 抓取自己的农场登录并保存为 `.saz`。
 4. 在网页点击 **导入 Fiddler SAZ**。登录记录需在 **5 分钟内**，文件不超过 **40 MiB**。
 5. 设置种植优先级和挂机选项，保存后点击 **开始挂机**。
 
 关闭浏览器后，程序会继续运行；关闭运行程序的终端或让电脑休眠，会中断挂机。程序重启或农场授权失效后，需要重新抓包、上传并开始挂机。
+
+## SAZ 是什么，怎么获取？
+
+**SAZ（Session Archive Zip）是 Fiddler 保存网络请求和回复的抓包文件。** 本项目从中提取农场临时授权和登录信息，连接你的农场；不需要手动复制 Cookie。以下使用 Windows 上的 Fiddler Classic：
+
+1. 从 [官网下载 Fiddler Classic](https://www.telerik.com/fiddler/fiddler-classic)，安装后打开。
+2. 进入 **Tools → Options → HTTPS**，勾选 **Decrypt HTTPS traffic**，按软件提示安装、信任其解密证书。可参考 [官方 HTTPS 设置说明](https://www.telerik.com/fiddler/fiddler-classic/documentation/configure-fiddler/decrypthttps)。
+3. 先关闭 QQ 农场小程序，清空 Fiddler 的旧会话；确认 **File → Capture Traffic** 已开启。
+4. 登录电脑 QQ，重新打开 QQ 农场小程序，等待成功进入农场。Fiddler 中应出现 `gate-obt.nqf.qq.com` 的农场连接。
+5. 关闭农场小程序，让这次连接结束，然后使用 **File → Save → All Sessions** 保存为 `.saz`。这是 [Fiddler 官方的 SAZ 保存方式](https://www.telerik.com/fiddler/fiddler-classic/documentation/save-and-load-traffic/createsaz)，不要导出成 HAR 或只保存截图。
+6. 在 **5 分钟内**把 SAZ 上传到农场管家。这里的时间从游戏成功登录算起，刚导出旧记录也不能使用。
+
+授权成功后可以退出 Fiddler，挂机期间不需要它一直运行。SAZ 可能包含其他应用的请求和临时凭证，请只上传到自己的程序，不要提交到 GitHub。
 
 ## 功能
 
@@ -36,9 +51,9 @@ uv 会按项目要求准备 Python 3.12 和依赖。仓库已包含构建好的�
 
 程序按游戏返回的成熟时间安排检查，默认成熟后延迟 **60 秒**；每日任务默认 **4 小时**检查一次。邮件附件由用户在游戏内领取。
 
-## 服务器运行（可选）
+## 服务器运行（推荐，可选）
 
-服务器上也可以使用上面的命令。默认监听 `127.0.0.1:8790`，只允许本机访问。
+服务器上也可以使用上面的命令。长期挂机建议按 [部署说明](docs/网页部署说明.md) 安装为后台服务；仅在 SSH 终端里启动，退出终端后可能会停止。默认监听 `127.0.0.1:8790`，只允许本机访问。
 
 需要远程访问时，可以使用 SSH 隧道：
 
@@ -82,6 +97,6 @@ npm --prefix frontend run build
 uv run --locked --no-dev python scripts/package_server.py
 ```
 
-输出 `dist/qqfarm-web-0.6.1-server.zip`，不含运行数据、密码或抓包文件。
+输出 `dist/qqfarm-web-0.6.2-server.zip`，不含运行数据、密码或抓包文件。
 
 项目暂未指定开源许可证。第三方组件来源和许可见 [THIRD_PARTY.md](THIRD_PARTY.md)。

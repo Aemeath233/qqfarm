@@ -113,7 +113,7 @@ const {
       <div class="side-bottom">
         <div class="status-dot" :class="{ live: ready }"></div>
         {{ ready ? "农场连接正常" : "等待农场授权"
-        }}<small>后台保持连接，关闭网页不影响运行</small
+        }}<small>{{ data.running ? '关闭网页不影响运行，请保持程序运行' : ready ? '当前未挂机，等待开始' : '农场连接已断开，请重新授权' }}</small
         ><button class="text-button" @click="logout">退出面板</button>
       </div>
     </aside>
@@ -156,7 +156,7 @@ const {
       <div class="banner">
         <div>
           {{ data.note
-          }}<small>关闭网页后，已启动的挂机任务仍会继续运行。</small>
+          }}<small>{{ data.running ? '挂机进行中。关闭网页不影响运行，请保持程序运行。' : ready ? '当前未挂机，可点击开始挂机。' : '当前未挂机，请重新导入授权后开始。' }}</small>
         </div>
         <span v-if="data.heartbeat?.acknowledged" class="tag">心跳正常</span>
       </div>

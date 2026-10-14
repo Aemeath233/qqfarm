@@ -34,6 +34,8 @@ const operationNames = {
   friend_steal: "好友采摘",
   friend_insects: "放虫",
   friend_weeds: "放草",
+  care_verification: "照料结果复查",
+  friend_visit_leave: "离开好友农场",
   action_delay: "操作等待",
 };
 const stateNames = {

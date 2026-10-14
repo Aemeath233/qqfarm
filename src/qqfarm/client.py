@@ -1,5 +1,6 @@
 import asyncio
 import random
+import re
 import time
 from contextlib import suppress
 from urllib.parse import urlencode
@@ -65,9 +66,25 @@ WRITES = {
 
 
 class RPCError(FarmError):
-    def __init__(self, method, code):
+    def __init__(self, method, code, message="", *, body_bytes=0):
         self.method, self.code = method, code
-        super().__init__(f"{method} 被服务器拒绝（错误码 {code}）。")
+        self.message, self.body_bytes = message, body_bytes
+        explanation = f"游戏提示：{message}" if message else ""
+        super().__init__(f"{method} 被服务器拒绝（错误码 {code}）。" + explanation)
+
+
+def error_message(text, settings):
+    """Keep the optional game explanation without persisting authorization values."""
+    for secret in (settings.login_code, *settings.friend_open_ids):
+        if secret:
+            text = text.replace(secret, "[已隐藏]")
+    text = re.sub(
+        r"(?i)((?:code|token|cookie|authorization|openid)\s*[=:]\s*)[^\s&,;]+",
+        r"\1[已隐藏]",
+        text,
+    )
+    text = re.sub(r"(?i)Bearer\s+\S+", "Bearer [已隐藏]", text)
+    return " ".join(text.split())[:300]
 
 
 class UncertainOutcome(FarmError):
@@ -261,7 +278,14 @@ class GameClient:
                 self.audit.record(operation, "cancelled", seq=seq, reason="writes_paused")
                 raise
             except RPCError as exc:
-                self.audit.record(operation, "rejected", seq=seq, code=exc.code)
+                self.audit.record(
+                    operation,
+                    "rejected",
+                    seq=seq,
+                    code=exc.code,
+                    message=exc.message,
+                    reply_body_bytes=exc.body_bytes,
+                )
                 raise
             except (TimeoutError, aiohttp.ClientError, FarmError, ConnectionError) as exc:
                 if self.stop_requested and not sent:
@@ -298,7 +322,14 @@ class GameClient:
                     if (packet["service"], packet["method"]) != (service, method):
                         raise wire.ProtocolError("回复服务或方法与请求不匹配。")
                     if packet["error"]:
-                        future.set_exception(RPCError(method, packet["error"]))
+                        future.set_exception(
+                            RPCError(
+                                method,
+                                packet["error"],
+                                error_message(packet["error_message"], self.settings),
+                                body_bytes=len(packet["body"]),
+                            )
+                        )
                     else:
                         future.set_result(packet["body"])
                 elif packet["type"] == 3:

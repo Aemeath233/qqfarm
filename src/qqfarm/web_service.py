@@ -36,6 +36,14 @@ FRIEND_METHODS = {
 }
 
 
+class FriendInteractionPaused(FarmError):
+    """Only the affected friend action needs attention; own farming can continue."""
+
+
+def friend_rejection(exc):
+    return f"{exc} 原因未确认，此类互动已暂停；确认后可手动恢复。"
+
+
 def friend_body(method, friend_id, ids):
     if method in {"PutInsects", "PutWeeds"}:
         # 当前1.14.2.15抓包核对：host在1，packed地块在2；不能套用旧版相反的字段。
@@ -699,7 +707,7 @@ class FarmService:
                     self.friend_stats.block(
                         self.audit.account,
                         arguments["kind"],
-                        f"接口拒绝，错误码 {exc.code}；需手动恢复",
+                        friend_rejection(exc),
                     )
                 raise
             finally:
@@ -829,9 +837,67 @@ class FarmService:
             return
         body = wire.packed(1, ids) + wire.uint(2, c.gid) + wire.uint(3, 0) + wire.uint(4, 0)
         response = await c.rpc(PLANT, "Farming", body)
-        self.update_farming(self.rows, response, ids)
-        self.limits.update(catalog.limits(response))
-        self.audit.record("care", "confirmed", plots=ids)
+        confirmed = await self.confirm_care(self.rows, response, ids)
+        self.merge_limits(catalog.limits(response))
+        self.audit.record("care", "confirmed" if confirmed else "received", plots=ids)
+
+    async def read_friend_lands(self, friend_id, *, revisit=False):
+        c = self.require_client()
+        if revisit:
+            await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
+        payload = await c.rpc(
+            VISIT,
+            "Enter",
+            wire.uint(1, friend_id) + wire.uint(2, 2) + wire.uint(3, 0) + wire.blob(7, b""),
+        )
+        fields = wire.parse(payload)
+        if wire.number(wire.parse(wire.data(fields, 1)), 1) != friend_id:
+            raise FarmError("好友农场身份与请求不匹配，未执行互动。")
+        return {plot.id: plot for plot in (models.land(v) for v in fields.get(2, []))}
+
+    async def confirm_care(self, rows, payload, ids, *, friend_id=None):
+        try:
+            self.update_farming(rows, payload, ids)
+            return True
+        except UncertainOutcome:
+            # Successful Farming replies may omit untouched/stale targets. Query once;
+            # never send a second write to determine what happened.
+            self.audit.record(
+                "care_verification",
+                "started",
+                plots=ids,
+                returned_plots=[p.id for p in models.lands(payload)],
+                friend=tag(friend_id) if friend_id is not None else None,
+            )
+        if friend_id is not None:
+            latest = await self.read_friend_lands(friend_id, revisit=True)
+        else:
+            latest_payload = await self.require_client().rpc(PLANT, "AllLands")
+            latest = {p.id: p for p in models.lands(latest_payload)}
+            self.merge_limits(catalog.limits(latest_payload))
+        rows.update(latest)
+        unresolved = [
+            key
+            for key in ids
+            if key not in latest
+            or latest[key].dry_num
+            or latest[key].weed_owners
+            or latest[key].insect_owners
+        ]
+        if unresolved:
+            reason = "照料回包未完整确认，复查后仍无法核实全部目标；已暂停，不重复提交。"
+            self.audit.record("care_verification", "unknown", plots=unresolved)
+            if friend_id is not None:
+                self.friend_stats.block(self.audit.account, "help", reason)
+                raise FriendInteractionPaused(reason)
+            raise UncertainOutcome(reason)
+        self.audit.record(
+            "care_verification",
+            "received",
+            plots=ids,
+            reason="复查确认目标已无需照料；未重发请求，也不计为本助手确认的帮助次数。",
+        )
+        return False
 
     async def friend_cycle(self, policy):
         for kind in ("help", "steal", "insects", "weeds"):
@@ -867,10 +933,10 @@ class FarmService:
                             c.allow_writes = False
                             c.settings = replace(c.settings, random_action_delays=False)
                 except RPCError as exc:
-                    self.friend_stats.block(
-                        self.audit.account, kind, f"接口拒绝，错误码 {exc.code}；需手动恢复"
-                    )
+                    self.friend_stats.block(self.audit.account, kind, friend_rejection(exc))
                     self.audit.record("friend_action", "skipped", friend=tag(gid), code=exc.code)
+                    break
+                except FriendInteractionPaused:
                     break
                 if self.next_check and time.time() >= self.next_check:
                     return
@@ -926,17 +992,8 @@ class FarmService:
             or friend_id not in {f["id"] for f in self.friends}
         ):
             raise FarmError("好友或互动类型无效")
-        payload = await c.rpc(
-            VISIT,
-            "Enter",
-            wire.uint(1, friend_id) + wire.uint(2, 2) + wire.uint(3, 0) + wire.blob(7, b""),
-        )
-        fields = wire.parse(payload)
-        if wire.number(wire.parse(wire.data(fields, 1)), 1) != friend_id:
-            await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
-            raise FarmError("好友农场身份与请求不匹配，未执行互动。")
-        rows = {plot.id: plot for plot in (models.land(v) for v in fields.get(2, []))}
         try:
+            rows = await self.read_friend_lands(friend_id)
             actions = (
                 [
                     (
@@ -991,9 +1048,59 @@ class FarmService:
                     if kind == "help"
                     else {}
                 )
-                response = await c.rpc(PLANT, method, friend_body(method, friend_id, ids))
+                try:
+                    response = await c.rpc(PLANT, method, friend_body(method, friend_id, ids))
+                except RPCError as exc:
+                    if kind not in {"help", "steal"} or exc.method != method:
+                        raise
+                    latest = await self.read_friend_lands(friend_id, revisit=True)
+                    # Missing land records are not evidence that the action is safe.
+                    changed = [
+                        key
+                        for key in ids
+                        if key in latest
+                        and (
+                            (latest[key].plant_id, latest[key].mature_at)
+                            != (rows[key].plant_id, rows[key].mature_at)
+                            or (
+                                kind == "help"
+                                and not (
+                                    latest[key].dry_num
+                                    or latest[key].weed_owners
+                                    or latest[key].insect_owners
+                                )
+                            )
+                            or (
+                                kind == "steal"
+                                and not (
+                                    latest[key].status(c.server_now(), allow_shared=True)
+                                    == "mature"
+                                    and latest[key].stealable
+                                    and latest[key].left_fruit > 0
+                                )
+                            )
+                        )
+                    ]
+                    rows = latest
+                    if not changed or not set(ids).issubset(latest):
+                        raise exc
+                    self.audit.record(
+                        "friend_" + kind,
+                        "skipped",
+                        friend=tag(friend_id),
+                        method=method,
+                        code=exc.code,
+                        message=exc.message,
+                        plots=ids,
+                        changed_plots=changed,
+                        reason="拒绝后复查发现目标状态已变化，本次跳过，未重发；错误码含义未确定。",
+                    )
+                    continue
                 if method == "Farming":
-                    self.update_farming(rows, response, ids)
+                    confirmed = await self.confirm_care(rows, response, ids, friend_id=friend_id)
+                    self.merge_limits(catalog.limits(response))
+                    if not confirmed:
+                        continue
                 else:
                     FarmEngine.updated_batch(rows, response, ids)
                 self.merge_limits(catalog.limits(response, 4 if method == "Harvest" else 2))
@@ -1022,12 +1129,20 @@ class FarmService:
                     )
                     friend["checked_at"] = time.time()
         except RPCError as exc:
-            self.friend_stats.block(
-                self.audit.account, kind, f"接口拒绝，错误码 {exc.code}；需手动恢复"
-            )
+            self.friend_stats.block(self.audit.account, kind, friend_rejection(exc))
             raise
         finally:
-            await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
+            try:
+                await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
+            except RPCError as exc:
+                # A refused Leave must not replace the original action/verification error.
+                self.audit.record(
+                    "friend_visit_leave",
+                    "rejected",
+                    friend=tag(friend_id),
+                    code=exc.code,
+                    message=exc.message,
+                )
 
     async def close(self):
         await self.pause()
