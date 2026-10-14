@@ -26,7 +26,13 @@ from qqfarm.client import (
 )
 from qqfarm.config import FarmError, Settings
 from qqfarm.engine import FarmEngine
-from qqfarm.friend_stats import FriendStats, day_key
+from qqfarm.friend_stats import (
+    ACTION_METHODS,
+    DAILY_LIMIT_CODE,
+    KNOWN_SKIP_CODES,
+    FriendStats,
+    day_key,
+)
 from qqfarm.web_policy import Policy
 
 FRIEND_METHODS = {
@@ -88,6 +94,7 @@ class FarmService:
         self.profile = None
         self.updated_at = 0
         self.next_check = 0
+        self.friend_notes = {}
         self.note = "尚未连接，请导入本账号农场授权"
         self.mode = "offline"
         self.rows = {}
@@ -178,6 +185,7 @@ class FarmService:
         if self.client:
             self.player["gold"] = self.client.gold
         statistics = self.friend_stats.snapshot(self.audit.account, now)
+        daily_blocks = self.friend_stats.daily_blocks(self.audit.account, now)
         return {
             "version": __version__,
             "capabilities": [
@@ -229,7 +237,13 @@ class FarmService:
             "tasks": self.tasks,
             "limits": self.limits,
             "friend_stats": statistics,
-            "friend_blocks": self.friend_stats.blocks(self.audit.account, now),
+            "friend_blocks": {
+                kind: reason
+                for kind, reason in self.friend_stats.blocks(self.audit.account, now).items()
+                if kind not in daily_blocks
+            },
+            "friend_daily_limits": daily_blocks,
+            "friend_notes": self.friend_notes,
             "friend_quota": self.friend_quotas(now),
             "operations": list(self.operations.values()),
             "planting_decisions": self.planting_decisions,
@@ -262,6 +276,7 @@ class FarmService:
 
     def reset_farm_state(self):
         self.rows, self.seeds, self.bag, self.friends, self.tasks = {}, [], [], [], []
+        self.friend_notes.clear()
         self.limits.clear()
         self.planting_decisions = []
         self.planted_this_round.clear()
@@ -836,7 +851,23 @@ class FarmService:
         if not ids:
             return
         body = wire.packed(1, ids) + wire.uint(2, c.gid) + wire.uint(3, 0) + wire.uint(4, 0)
-        response = await c.rpc(PLANT, "Farming", body)
+        try:
+            response = await c.rpc(PLANT, "Farming", body)
+        except RPCError as exc:
+            if exc.method != "Farming" or exc.code != KNOWN_SKIP_CODES["help"]:
+                raise
+            latest = await c.rpc(PLANT, "AllLands")
+            self.rows = {plot.id: plot for plot in models.lands(latest)}
+            self.merge_limits(catalog.limits(latest))
+            self.audit.record(
+                "care",
+                "skipped",
+                plots=ids,
+                code=exc.code,
+                message=exc.message,
+                reason="游戏确认作物不需要照料，已刷新状态，本次跳过，不重发。",
+            )
+            return
         confirmed = await self.confirm_care(self.rows, response, ids)
         self.merge_limits(catalog.limits(response))
         self.audit.record("care", "confirmed" if confirmed else "received", plots=ids)
@@ -945,6 +976,7 @@ class FarmService:
         day = day_key(now)
         if day != self.limits_day:
             self.limits.clear()
+            self.friend_notes.clear()
             self.limits_day = day
 
     def merge_limits(self, values):
@@ -956,6 +988,7 @@ class FarmService:
     def friend_quotas(self, now):
         self.roll_limits(now)
         totals = self.friend_stats.snapshot(self.audit.account, now)["totals"]
+        daily_blocks = self.friend_stats.daily_blocks(self.audit.account, now)
         result = {}
         for kind in ("insects", "weeds"):
             server = self.limits.get(FRIEND_METHODS[kind][1], {})
@@ -964,7 +997,8 @@ class FarmService:
             result[kind] = {
                 "used": used,
                 "maximum": maximum,
-                "remaining": max(0, maximum - used),
+                "remaining": 0 if kind in daily_blocks else max(0, maximum - used),
+                "game_limit_reached": kind in daily_blocks,
                 "source": "游戏回包与本助手记录" if server else "本助手保守上限",
             }
         return result
@@ -1020,9 +1054,9 @@ class FarmService:
                     identity = (
                         f"{c.gid}:{friend_id}:{plot.id}:{plot.plant_id}:{plot.mature_at}:{method}"
                     )
-                    if (
-                        eligible
-                        and not self.audit.db.execute(
+                    if eligible and (
+                        kind == "help"
+                        or not self.audit.db.execute(
                             "SELECT 1 FROM friend_effects WHERE identity=?", (identity,)
                         ).fetchone()
                     ):
@@ -1051,6 +1085,43 @@ class FarmService:
                 try:
                     response = await c.rpc(PLANT, method, friend_body(method, friend_id, ids))
                 except RPCError as exc:
+                    if exc.method == ACTION_METHODS[kind] and exc.code == DAILY_LIMIT_CODE:
+                        reason = "游戏判定今日次数已达上限；次日自动恢复。"
+                        self.friend_stats.block(
+                            self.audit.account, kind, reason, day=day_key(c.server_now())
+                        )
+                        self.audit.record(
+                            "friend_" + kind,
+                            "skipped",
+                            friend=tag(friend_id),
+                            code=exc.code,
+                            message=exc.message,
+                            reason="daily_limit",
+                        )
+                        raise FriendInteractionPaused(reason) from None
+                    if exc.method == ACTION_METHODS[kind] and exc.code == KNOWN_SKIP_CODES.get(
+                        kind
+                    ):
+                        # A verified game explanation is sufficient even if a fresh
+                        # query still carries a stale stealable/needs-care flag.
+                        reason = (
+                            "作物不需要照料，本次已跳过，继续检查其他好友。"
+                            if kind == "help"
+                            else "果实已被摘走，本次已跳过，继续检查其他好友。"
+                        )
+                        self.friend_notes[kind] = reason
+                        self.audit.record(
+                            "friend_" + kind,
+                            "skipped",
+                            friend=tag(friend_id),
+                            method=method,
+                            code=exc.code,
+                            message=exc.message,
+                            plots=ids,
+                            reason=reason,
+                        )
+                        rows = await self.read_friend_lands(friend_id, revisit=True)
+                        continue
                     if kind not in {"help", "steal"} or exc.method != method:
                         raise
                     latest = await self.read_friend_lands(friend_id, revisit=True)
@@ -1119,6 +1190,7 @@ class FarmService:
                     plots=ids,
                     care_counts=care_counts,
                 )
+                self.friend_notes.pop(kind, None)
             for friend in self.friends:
                 if friend["id"] == friend_id:
                     friend["stealable_plots"] = sum(

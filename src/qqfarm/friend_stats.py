@@ -1,10 +1,19 @@
 """Persistent counts from confirmed operations, scoped to account and Beijing day."""
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 KINDS = ("help", "steal", "insects", "weeds")
 BEIJING = timezone(timedelta(hours=8))
+KNOWN_SKIP_CODES = {"help": 1001057, "steal": 1001040}
+DAILY_LIMIT_CODE = 1001046
+ACTION_METHODS = {
+    "help": "Farming",
+    "steal": "Harvest",
+    "insects": "PutInsects",
+    "weeds": "PutWeeds",
+}
 
 
 def day_key(stamp):
@@ -29,6 +38,45 @@ class FriendStats:
             );
         """)
         self.update()
+        self.migrate_known_blocks()
+
+    def migrate_known_blocks(self):
+        """Convert only the now-verified ordinary errors from older releases."""
+        rows = self.db.execute("SELECT account,kind,day,reason FROM friend_blocks").fetchall()
+        with self.db:
+            for account, kind, day, reason in rows:
+                codes = set(int(v) for v in re.findall(r"\b100\d{4}\b", reason))
+                if KNOWN_SKIP_CODES.get(kind) in codes:
+                    self.db.execute(
+                        "DELETE FROM friend_blocks WHERE account=? AND kind=? AND day=?",
+                        (account, kind, day),
+                    )
+                elif DAILY_LIMIT_CODE in codes and day == "*" and kind in ACTION_METHODS:
+                    # Use the original rejection's day, not today's restart day.
+                    # If retention removed that record, this old daily cap has expired.
+                    previous_day = None
+                    for stamp, encoded in self.db.execute(
+                        "SELECT at,details FROM operations WHERE account=? AND operation=? "
+                        "AND state='rejected' ORDER BY id DESC",
+                        (account, "rpc_" + ACTION_METHODS[kind]),
+                    ):
+                        if json.loads(encoded).get("code") == DAILY_LIMIT_CODE:
+                            previous_day = day_key(stamp)
+                            break
+                    self.db.execute(
+                        "DELETE FROM friend_blocks WHERE account=? AND kind=? AND day='*'",
+                        (account, kind),
+                    )
+                    if previous_day:
+                        self.db.execute(
+                            "INSERT OR REPLACE INTO friend_blocks VALUES(?,?,?,?)",
+                            (
+                                account,
+                                kind,
+                                previous_day,
+                                "游戏判定今日次数已达上限；次日自动恢复。",
+                            ),
+                        )
 
     def update(self):
         cursor = self.db.execute("SELECT cursor FROM friend_stats_cursor WHERE id=1").fetchone()[0]
@@ -104,6 +152,14 @@ class FriendStats:
         return dict(
             self.db.execute(
                 "SELECT kind,reason FROM friend_blocks WHERE account=? AND day IN ('*',?)",
+                (account, day_key(now)),
+            ).fetchall()
+        )
+
+    def daily_blocks(self, account, now):
+        return dict(
+            self.db.execute(
+                "SELECT kind,reason FROM friend_blocks WHERE account=? AND day=?",
                 (account, day_key(now)),
             ).fetchall()
         )

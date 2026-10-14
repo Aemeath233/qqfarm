@@ -579,7 +579,11 @@ const {
                   v-model="draft['friend_' + kind]"
                   type="checkbox" /></label
               ><small>{{ description }}</small>
-              <div v-if="data.friend_blocks?.[kind]" class="friend-block">
+              <div v-if="data.friend_daily_limits?.[kind]" class="friend-block">
+                <b>今日已达游戏上限</b>
+                <p>{{ data.friend_daily_limits[kind] }}</p>
+              </div>
+              <div v-else-if="data.friend_blocks?.[kind]" class="friend-block">
                 <b>已暂停</b>
                 <p>{{ data.friend_blocks[kind] }}</p>
                 <button
@@ -594,9 +598,14 @@ const {
                   恢复{{ label }}
                 </button>
               </div>
+              <p v-else-if="data.friend_notes?.[kind]" class="quota">{{ data.friend_notes[kind] }}</p>
               <p v-if="data.friend_quota?.[kind]" class="quota">
-                今日已用 {{ data.friend_quota[kind].used }} /
-                {{ data.friend_quota[kind].maximum }}
+                <template v-if="data.friend_quota[kind].game_limit_reached">
+                  本助手今日记录 {{ data.friend_quota[kind].used }} 次；游戏已限制继续操作
+                </template>
+                <template v-else>
+                  今日已用 {{ data.friend_quota[kind].used }} / {{ data.friend_quota[kind].maximum }}
+                </template>
               </p>
               <div class="selected-friends">
                 <div v-for="(id, i) in draft[kind + '_priority']" :key="id">

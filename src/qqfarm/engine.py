@@ -88,12 +88,26 @@ class FarmEngine:
 
     def next_delay(self, rows):
         now = self.client.server_now()
-        targets = [
-            land.mature_at + self.settings.maturity_grace_seconds + 2
+        active = [
+            land
             for land in rows.values()
             if land.status(now, allow_shared=self.include_shared) in {"growing", "mature"}
-            and land.mature_at
-            and land.mature_at + self.settings.maturity_grace_seconds + 2 > now
+        ]
+        # A round can spend minutes harvesting and planting other lands. Crops that
+        # became due during that work must run before the newly planted crop timers.
+        if not self.grouped_maturity and any(
+            (land.mature_at and land.mature_at + self.settings.maturity_grace_seconds + 2 <= now)
+            or (
+                not land.mature_at
+                and land.status(now, allow_shared=self.include_shared) == "mature"
+            )
+            for land in active
+        ):
+            return 5
+        targets = [
+            land.mature_at + self.settings.maturity_grace_seconds + 2
+            for land in active
+            if land.mature_at and land.mature_at + self.settings.maturity_grace_seconds + 2 > now
         ]
         if targets and (self.settings.maturity_grace_seconds or self.settings.random_action_delays):
             return max(5, (max(targets) if self.grouped_maturity else min(targets)) - now)
