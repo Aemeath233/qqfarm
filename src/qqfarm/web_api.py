@@ -391,8 +391,8 @@ def create_app(root, *, password=None, service=None):
 
     @app.post("/api/refresh")
     async def refresh():
-        await service.refresh()
-        return {"ok": True}
+        refreshed = await service.refresh()
+        return {"ok": True, "refreshed": refreshed}
 
     async def mutation(request, action, **args):
         key = request.headers.get("Idempotency-Key", "")

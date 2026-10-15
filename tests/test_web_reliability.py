@@ -197,6 +197,59 @@ def test_log_retention_runs_without_a_service_restart(tmp_path, monkeypatch):
         audit.close()
 
 
+async def test_remote_disconnect_releases_account_lock_and_marks_snapshot_stale(tmp_path):
+    service = FarmService(tmp_path)
+    client = SimpleNamespace(
+        closed=False,
+        fault=FarmError("游戏要求下线"),
+        disconnect_reason="server_kickout",
+        disconnected=asyncio.Event(),
+        allow_writes=False,
+        close=AsyncMock(),
+    )
+    service.client = client
+    service.session = SimpleNamespace(close=AsyncMock())
+    service.lock = InstanceLock(tmp_path / "account.lock")
+    service.lock.__enter__()
+    service.mode = "connected"
+    service.rows = {1: models.lands(plot(1, int(time.time()) - 1))[0]}
+    service.updated_at = time.time() - 60
+    observer = asyncio.create_task(service.observe())
+    service.observer = observer
+    try:
+        await asyncio.sleep(0)
+        client.disconnected.set()
+        await asyncio.wait_for(observer, timeout=2)
+        status = service.view()
+        assert status["mode"] == "offline"
+        assert not status["snapshot_fresh"]
+        assert status["lands"][0]["status"] == "mature"
+        assert "具体原因无法" in status["note"]
+        assert service.client is None and service.session is None and service.lock is None
+        with InstanceLock(tmp_path / "account.lock"):
+            pass
+    finally:
+        if not observer.done():
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+        await service.close()
+
+
+async def test_refresh_is_not_skipped_after_partial_state_update(tmp_path):
+    service = FarmService(tmp_path)
+    service.full_refresh_at = time.time() - 30
+    service.updated_at = time.time()
+    service.refresh_locked = AsyncMock()
+    try:
+        assert await service.refresh() is True
+        service.refresh_locked.assert_awaited_once()
+        service.full_refresh_at = time.time()
+        assert await service.refresh() is False
+        service.refresh_locked.assert_awaited_once()
+    finally:
+        service.audit.close()
+
+
 async def test_pause_cancels_queued_manual_work_before_it_can_write(tmp_path):
     service = FarmService(tmp_path)
     service.client = SimpleNamespace(closed=False, fault=None, allow_writes=False)

@@ -22,6 +22,7 @@ const {
   names,
   actions,
   ready,
+  snapshotFresh,
   changed,
   unlocked,
   visiblePlants,
@@ -133,7 +134,15 @@ const {
             导入 Fiddler SAZ</button
           ><button
             :disabled="busy || !ready"
-            @click="run(() => api('/refresh', 'POST'), '已刷新游戏数据')"
+            @click="
+              run(
+                () => api('/refresh', 'POST'),
+                (result) =>
+                  result?.refreshed === false
+                    ? '最近 10 秒内已同步，显示最近一次同步数据'
+                    : '已刷新游戏数据',
+              )
+            "
           >
             刷新状态</button
           ><button
@@ -151,14 +160,40 @@ const {
           >
             {{ pausing ? "正在暂停…" : "暂停操作" }}
           </button>
+          <button class="toolbar-logout" :disabled="busy" @click="logout">
+            退出面板
+          </button>
         </div>
       </header>
-      <div class="banner">
+      <div class="banner" :class="{ disconnected: !ready }">
         <div>
           {{ data.note
-          }}<small>{{ data.running ? '挂机进行中。关闭网页不影响运行，请保持程序运行。' : ready ? '当前未挂机，可点击开始挂机。' : '当前未挂机，请重新导入授权后开始。' }}</small>
+          }}<small>{{
+            data.running
+              ? "挂机进行中；关闭网页后程序仍需保持运行。"
+              : ready
+                ? "农场已连接，点击“开始挂机”才会自动种收。"
+                : "农场未连接；导入刚登录时抓取的 SAZ 后，再点击“开始挂机”。"
+          }}</small>
         </div>
         <span v-if="data.heartbeat?.acknowledged" class="tag">心跳正常</span>
+      </div>
+      <div v-if="!data.running" class="next-step">
+        <span class="step-index">下一步</span>
+        <div v-if="!ready">
+          <b>重新授权农场</b>
+          <small>在 Fiddler 抓取一次成功登录，5 分钟内导出 SAZ 并上传。</small>
+        </div>
+        <div v-else>
+          <b>开始自动种收</b>
+          <small>连接和心跳已验证；开始后按种植计划自动运行。</small>
+        </div>
+        <button v-if="!ready" :disabled="busy" @click="authFile.click()">
+          导入 SAZ
+        </button>
+        <button v-else class="primary" :disabled="busy" @click="start">
+          {{ changed ? "保存并开始" : "开始挂机" }}
+        </button>
       </div>
       <div v-if="connectionError" class="notice error" role="alert">
         {{ connectionError
@@ -181,7 +216,7 @@ const {
       </div>
       <div v-if="page === 'overview'" class="metrics">
         <article>
-          <span>当前账号</span
+          <span>{{ snapshotFresh ? "当前账号" : "上次连接账号" }}</span
           ><strong>{{ data.player.name || "待授权" }}</strong
           ><small>Lv. {{ data.player.level }}</small>
         </article>
@@ -192,7 +227,11 @@ const {
         <article>
           <span>我的土地</span
           ><strong>{{ data.lands.length }}<em>块</em></strong
-          ><small>{{ ripe }} 块可收获</small>
+          ><small>{{
+            snapshotFresh
+              ? `${ripe} 块可收获`
+              : `${ripe} 块预计成熟，待联网确认`
+          }}</small>
         </article>
         <article>
           <span>已解锁植物</span><strong>{{ unlocked }}<em>种</em></strong
@@ -201,6 +240,17 @@ const {
       </div>
 
       <template v-if="page === 'overview'">
+        <div
+          v-if="!snapshotFresh && data.updated_at"
+          class="snapshot-warning"
+          role="status"
+        >
+          土地和库存是上次连接的数据。上次同步：{{
+            new Date(data.updated_at * 1000).toLocaleString("zh-CN", {
+              hour12: false,
+            })
+          }}。断线期间的变化需重新授权后确认。
+        </div>
         <div class="overview-grid">
           <section class="panel">
             <div class="panel-heading">
@@ -233,7 +283,7 @@ const {
             <div v-if="!data.lands.length" class="empty">
               导入授权后显示土地状态
             </div>
-            <div class="land-grid">
+            <div class="land-grid" :class="{ 'is-stale': !snapshotFresh }">
               <article
                 v-for="land in data.lands"
                 :key="land.id"
@@ -242,7 +292,11 @@ const {
               >
                 <div class="land-top">
                   <span>{{ String(land.id).padStart(2, "0") }} 号地</span
-                  ><span>{{ names[land.status] }}</span>
+                  ><span>{{
+                    !snapshotFresh && land.status === "mature"
+                      ? "预计成熟"
+                      : names[land.status]
+                  }}</span>
                 </div>
                 <b>{{ land.name }}</b>
                 <small v-if="land.status === 'growing' && land.mature_at">{{
@@ -793,6 +847,9 @@ const {
       </section>
 
       <section v-if="page === 'tasks'" class="panel">
+        <div v-if="data.task_note" class="snapshot-warning" role="status">
+          {{ data.task_note }}
+        </div>
         <div class="panel-heading">
           <div>
             <h2>任务奖励</h2>

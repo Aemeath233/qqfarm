@@ -111,7 +111,13 @@ export function useFarm() {
     pollGeneration = 0,
     disposed = false;
   const ready = computed(() =>
-    ["connected", "running"].includes(data.value?.mode),
+    ["connected", "running"].includes(data.value?.mode) &&
+    data.value?.snapshot_fresh !== false,
+  );
+  const snapshotFresh = computed(() =>
+    data.value?.snapshot_fresh === undefined
+      ? ready.value
+      : data.value.snapshot_fresh,
   );
   const changed = computed(
     () => Object.keys(policyPatch(draft, basePolicy.value)).length > 0,
@@ -250,10 +256,16 @@ export function useFarm() {
     operationId.value = "";
     tell("");
     try {
-      await fn();
+      const result = await fn();
       epoch++;
-      await load({ fresh: true });
-      if (message) tell(typeof message === "function" ? message() : message);
+      if (!(await load({ fresh: true }))) {
+        tell(
+          "操作已提交，但页面状态尚未更新。请点击“重试读取状态”核对结果。",
+          true,
+        );
+        return true;
+      }
+      if (message) tell(typeof message === "function" ? message(result) : message);
       return true;
     } catch (e) {
       tell(e.message, true);
@@ -487,6 +499,7 @@ export function useFarm() {
     names,
     actions,
     ready,
+    snapshotFresh,
     changed,
     unlocked,
     visiblePlants,

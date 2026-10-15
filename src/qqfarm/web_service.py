@@ -93,8 +93,10 @@ class FarmService:
         self.running = False
         self.profile = None
         self.updated_at = 0
+        self.full_refresh_at = 0
         self.next_check = 0
         self.friend_notes = {}
+        self.task_note = ""
         self.note = "尚未连接，请导入本账号农场授权"
         self.mode = "offline"
         self.rows = {}
@@ -181,7 +183,14 @@ class FarmService:
             self.audit.record("seed_layout", "unavailable", reason="cache_write_failed")
 
     def view(self):
-        now = self.client.server_now() if self.client and not self.client.closed else time.time()
+        live = (
+            self.mode in {"connected", "running"}
+            and self.client is not None
+            and not self.client.closed
+            and not self.client.fault
+            and not self.client.disconnected.is_set()
+        )
+        now = self.client.server_now() if live else time.time()
         if self.client:
             self.player["gold"] = self.client.gold
         statistics = self.friend_stats.snapshot(self.audit.account, now)
@@ -201,6 +210,7 @@ class FarmService:
             "running": self.running,
             "note": self.note,
             "updated_at": self.updated_at,
+            "snapshot_fresh": live,
             "server_now": now,
             "next_check": self.next_check,
             "player": self.player,
@@ -235,6 +245,7 @@ class FarmService:
                 for friend in self.friends
             ],
             "tasks": self.tasks,
+            "task_note": self.task_note,
             "limits": self.limits,
             "friend_stats": statistics,
             "friend_blocks": {
@@ -277,10 +288,11 @@ class FarmService:
     def reset_farm_state(self):
         self.rows, self.seeds, self.bag, self.friends, self.tasks = {}, [], [], [], []
         self.friend_notes.clear()
+        self.task_note = ""
         self.limits.clear()
         self.planting_decisions = []
         self.planted_this_round.clear()
-        self.updated_at = self.next_check = self.task_check_at = 0
+        self.updated_at = self.full_refresh_at = self.next_check = self.task_check_at = 0
         self.profile = None
         self.audit.account = ""
         self.player = {"name": "未连接", "level": 0, "gold": 0, "fingerprint": ""}
@@ -396,9 +408,16 @@ class FarmService:
                 except Exception as exc:
                     self.audit.record("task_status", "unavailable", error=type(exc).__name__)
         if self.client is client:
-            self.running = False
-            self.stop.set()
-            self.mode, self.note = "offline", "农场连接已断开，已停止操作；请重新授权"
+            reason = client.disconnect_reason
+            await self.pause()
+            async with self.guard:
+                if self.client is client:
+                    await self.disconnect()
+                    self.note = (
+                        "游戏要求下线，已停止操作；请重新抓取登录 SAZ。具体原因无法从通知确认。"
+                        if reason == "server_kickout"
+                        else "心跳或游戏连接中断，已停止操作；请重新抓取登录 SAZ。"
+                    )
 
     def reward_delay(self):
         return max(
@@ -440,12 +459,14 @@ class FarmService:
         except RPCError:
             self.audit.record("friend_list", "unavailable")
         self.updated_at = time.time()
+        self.full_refresh_at = self.updated_at
 
     async def refresh(self):
         async with self.guard:
-            if time.time() - self.updated_at < 10:
-                return
+            if time.time() - self.full_refresh_at < 10:
+                return False
             await self.refresh_locked()
+            return True
 
     def require_client(self):
         if not self.client or self.client.closed or self.client.fault:
@@ -478,10 +499,10 @@ class FarmService:
             self.mode, self.note = "connected", "已暂停操作，心跳继续维护"
 
     async def disconnect(self):
-        if self.observer:
-            self.observer.cancel()
-            await asyncio.gather(self.observer, return_exceptions=True)
-            self.observer = None
+        observer, self.observer = self.observer, None
+        if observer and observer is not asyncio.current_task():
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
         if self.client:
             await self.client.close()
             self.client = None
@@ -596,10 +617,24 @@ class FarmService:
                         if policy.auto_sell:
                             await self.sell_locked(None)
                     if time.monotonic() >= self.task_check_at + policy.reward_check_interval:
-                        if policy.auto_claim:
-                            await self.claim_locked(None)
-                        else:
-                            await self.refresh_tasks_locked()
+                        try:
+                            if policy.auto_claim:
+                                await self.claim_locked(None)
+                            else:
+                                await self.refresh_tasks_locked()
+                        except RPCError as exc:
+                            # A definite task endpoint rejection does not invalidate
+                            # the independent crop schedule. The next check stays
+                            # bounded by reward_check_interval.
+                            self.audit.record(
+                                "task_status",
+                                "unavailable",
+                                code=exc.code,
+                                message=exc.message,
+                            )
+                            self.task_note = (
+                                f"游戏拒绝任务请求（错误码 {exc.code}）；本轮跳过，种收继续。"
+                            )
                     friends_enabled = any(
                         getattr(policy, "friend_" + kind)
                         for kind in ("help", "steal", "insects", "weeds")
@@ -629,8 +664,14 @@ class FarmService:
             pass
         except Exception as exc:
             self.audit.record("scheduler", "stopped", error=type(exc).__name__)
-            self.note = str(exc) if isinstance(exc, FarmError) else "调度异常，已暂停"
-            if isinstance(exc, UncertainOutcome):
+            self.note = (
+                "游戏回包格式异常，结果无法确认；已断开连接，请重新授权并核对农场。"
+                if isinstance(exc, wire.ProtocolError)
+                else str(exc)
+                if isinstance(exc, FarmError)
+                else "调度异常，已暂停"
+            )
+            if isinstance(exc, (UncertainOutcome, wire.ProtocolError)):
                 await self.disconnect()
         finally:
             self.running = False
@@ -715,7 +756,7 @@ class FarmService:
                 if action == "sell":
                     self.bag = catalog.inventory(await c.rpc(ITEM, "Bag"))
                 self.updated_at = time.time()
-            except UncertainOutcome:
+            except (UncertainOutcome, wire.ProtocolError):
                 await self.disconnect()
                 raise
             except RPCError as exc:
@@ -783,6 +824,7 @@ class FarmService:
         # 记录查询尝试，查询失败也不紧密重试；手动刷新和领奖仍可立即核对。
         self.task_check_at = time.monotonic()
         self.tasks = catalog.tasks(await c.rpc(TASK, "TaskInfo"))
+        self.task_note = ""
 
     async def claim_locked(self, task_id, *, operation_id=None):
         c = self.require_client()

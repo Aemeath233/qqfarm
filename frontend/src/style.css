@@ -167,7 +167,7 @@ nav button {
   border: none;
   background: transparent;
   text-align: left;
-  font-size: 14px;
+  font-size: 15px;
   padding: 13px 16px;
 }
 nav span {
@@ -224,6 +224,9 @@ header {
 .toolbar {
   display: flex;
   gap: 9px;
+}
+.toolbar-logout {
+  display: none;
 }
 .banner {
   display: flex;
@@ -406,12 +409,12 @@ header {
   font-size: 10px;
 }
 .priority-row b {
-  font-size: 12px;
+  font-size: 13px;
   flex: 1;
 }
 .priority-row button {
   padding: 3px 7px;
-  font-size: 11px;
+  font-size: 12px;
   border: 0;
   background: #f3f5ed;
 }
@@ -504,12 +507,12 @@ dd {
 }
 .friend-strategies small {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   margin: 8px 0 15px;
   min-height: 32px;
 }
 .selected-friends {
-  font-size: 11px;
+  font-size: 12px;
 }
 .selected-friends > div {
   display: flex;
@@ -522,9 +525,9 @@ dd {
   word-break: break-word;
 }
 .selected-friends button {
-  padding: 2px 5px;
+  padding: 5px 8px;
   border: 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 .selected-friends p {
   color: #a4ad99;
@@ -629,7 +632,7 @@ td button {
 .task-row small {
   display: block;
   margin-top: 5px;
-  font-size: 10px;
+  font-size: 12px;
 }
 .rewards {
   display: flex;
@@ -666,7 +669,7 @@ td button {
 }
 .setting-row small {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   margin-top: 7px;
 }
 .setting-row input:not([type="checkbox"]),
@@ -737,7 +740,7 @@ footer {
   padding: 12px;
 }
 .login-card small {
-  font-size: 10px;
+  font-size: 12px;
   display: block;
   margin-top: 22px;
 }
@@ -818,7 +821,7 @@ footer {
   }
   nav button {
     padding: 8px 12px;
-    font-size: 11px;
+    font-size: 13px;
     white-space: nowrap;
     gap: 5px;
   }
@@ -846,6 +849,14 @@ footer {
   .toolbar {
     justify-content: flex-start;
     width: 100%;
+  }
+  .toolbar button {
+    min-height: 40px;
+    font-size: 12px;
+  }
+  .toolbar-logout {
+    display: inline-flex;
+    align-items: center;
   }
   .metrics {
     grid-template-columns: repeat(2, 1fr);
@@ -1022,7 +1033,7 @@ footer {
   align-items: center;
   justify-content: space-between;
   gap: 5px;
-  font-size: 10px;
+  font-size: 11px;
   color: #708568;
   margin-bottom: 12px;
 }
@@ -1192,5 +1203,110 @@ footer {
     bottom: 8px;
     padding: 10px;
     font-size: 12px;
+  }
+}
+
+button:focus-visible,
+nav button:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.banner.disconnected {
+  background: #f7f0e4;
+  border-color: #e9dcc4;
+  color: #775d38;
+}
+
+.banner.disconnected small {
+  color: #806d52;
+}
+
+.next-step {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 15px 18px;
+  margin: -5px 0 21px;
+  border: 1px solid #d9e4d5;
+  border-radius: 11px;
+  background: #fcfdf8;
+}
+
+.next-step > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.next-step b,
+.next-step small {
+  display: block;
+}
+
+.next-step b {
+  font-size: 14px;
+}
+
+.next-step small {
+  margin-top: 3px;
+}
+
+.next-step button {
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.step-index {
+  flex: none;
+  border-radius: 6px;
+  background: #eaf1e4;
+  color: var(--green);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.snapshot-warning {
+  margin: 0 0 20px;
+  padding: 11px 15px;
+  border: 1px solid #eadcc2;
+  border-radius: 9px;
+  background: #fff8eb;
+  color: #705a39;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.land-grid.is-stale .land {
+  background: #f7f7f1;
+  border-color: #e5e7dc;
+}
+
+.land-grid.is-stale .land-top {
+  color: #747c70;
+}
+
+@media (max-width: 760px) {
+  .next-step {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .next-step > div {
+    flex-basis: calc(100% - 80px);
+  }
+
+  .next-step button {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .friend-strategies {
+    grid-template-columns: 1fr;
+  }
+
+  .land-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

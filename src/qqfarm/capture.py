@@ -13,6 +13,7 @@ from qqfarm.audit import tag
 from qqfarm.config import FarmError
 
 LOGIN_METHODS = {"Login", "PlayerLogin"}
+RECORD_HEADER = re.compile(rb"(Request|Response)-Length:[ \t]*(\d+)\r\n")
 
 
 def records(payload, *, include_headers=False):
@@ -22,9 +23,9 @@ def records(payload, *, include_headers=False):
             offset += 1
         if offset == len(payload):
             return
-        match = re.match(rb"(Request|Response)-Length:\s*(\d+)\r\n", payload[offset:])
+        match = RECORD_HEADER.match(payload, offset)
         end = payload.find(b"\r\n\r\n", offset)
-        if not match or end < 0:
+        if not match or end < 0 or end - offset > 8192:
             raise FarmError("不支持的 SAZ WebSocket 记录格式。")
         length = int(match[2])
         end += 4
@@ -54,6 +55,8 @@ def frame_body(raw):
             raise FarmError("帧长度被截断。")
         size, offset = int.from_bytes(raw[offset : offset + count], "big"), offset + count
     mask = raw[offset : offset + 4] if raw[1] & 128 else b""
+    if raw[1] & 128 and len(mask) != 4:
+        raise FarmError("帧掩码被截断。")
     offset += 4 if mask else 0
     if offset + size != len(raw):
         raise FarmError("帧长度不匹配。")
@@ -66,8 +69,17 @@ def frame_body(raw):
 def sessions(archive_path, *, include_headers=False):
     source = BytesIO(archive_path) if isinstance(archive_path, bytes) else archive_path
     with ZipFile(source) as archive:
-        names = set(archive.namelist())
+        members = archive.infolist()
+        if len(members) > 10000:
+            raise FarmError("SAZ 包含过多记录，请仅导出最近一次农场登录。")
+        names = {member.filename for member in members}
+        if len(names) != len(members):
+            raise FarmError("SAZ 包含重名记录，请重新导出。")
         entries = [n for n in names if re.fullmatch(r"raw/\d+_c.txt", n)]
+        if sum(archive.getinfo(name).file_size for name in entries) > 8 * 1024 * 1024:
+            raise FarmError("SAZ 请求记录过多，请仅导出最近一次农场登录。")
+        selected_bytes = 0
+        selected_sessions = 0
         for name in sorted(entries, key=lambda n: int(n.split("/")[1].split("_")[0])):
             if archive.getinfo(name).file_size > 65536:
                 continue
@@ -83,6 +95,10 @@ def sessions(archive_path, *, include_headers=False):
                 continue
             if archive.getinfo(websocket).file_size > 32 * 1024 * 1024:
                 raise FarmError("捕获会话过大，请导出较短的最新登录会话。")
+            selected_sessions += 1
+            selected_bytes += archive.getinfo(websocket).file_size
+            if selected_sessions > 64 or selected_bytes > 64 * 1024 * 1024:
+                raise FarmError("农场会话记录过多，请仅导出最近一次登录。")
             pairs = {}
             for header in headers[1:]:
                 key, colon, value = header.partition(b":")

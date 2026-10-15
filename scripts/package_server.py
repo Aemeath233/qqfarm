@@ -43,6 +43,7 @@ def main():
             "docs/网页部署说明.md",
             "docs/server-helper.md",
             "docs/code-review-20261013-v061.md",
+            "docs/code-review-20261015-v066.md",
             "docs/changes.md",
         )
     ]
