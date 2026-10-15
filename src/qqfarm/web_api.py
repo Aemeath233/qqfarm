@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
+from qqfarm import wire
 from qqfarm.config import FarmError
 from qqfarm.web_policy import Policy
 from qqfarm.web_service import FarmService
@@ -250,6 +251,10 @@ def create_app(root, *, password=None, service=None):
     @app.exception_handler(FarmError)
     async def farm_error(_request, error):
         return JSONResponse({"message": str(error)}, status_code=409)
+
+    @app.exception_handler(wire.ProtocolError)
+    async def protocol_error(_request, error):
+        return JSONResponse({"message": f"游戏回包格式异常，已停止操作：{error}"}, status_code=409)
 
     @app.post("/api/login")
     async def login(value: LoginInput, request: Request):

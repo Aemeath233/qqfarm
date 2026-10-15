@@ -217,7 +217,11 @@ class GameClient:
         if not self.gid:
             raise FarmError("登录回复没有有效玩家标识。")
         self.audit.account = tag(self.gid)
-        self.sync_clock(wire.number(reply, 3))
+        server_time = wire.number(reply, 3)
+        if server_time:
+            self.sync_clock(server_time)
+        elif self.settings.login_method != "PlayerLogin":
+            self.sync_clock(server_time)
         self.audit.record(
             "login",
             "success",
