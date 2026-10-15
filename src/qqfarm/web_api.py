@@ -11,7 +11,7 @@ import time
 import zlib
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from zipfile import BadZipFile
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -69,6 +69,7 @@ class AuthorizationInput(BaseModel):
     version: str = Field(max_length=80)
     os: str = Field(default="Windows", max_length=80)
     platform: str = "qq"
+    login_method: Literal["Login", "PlayerLogin"] = "Login"
     user_agent: str = Field(default="qqfarm-personal-web/1", max_length=2048)
     origin: str = Field(default="https://gate-obt.nqf.qq.com", max_length=2048)
     template: SecretStr | None = None
@@ -355,6 +356,7 @@ def create_app(root, *, password=None, service=None):
                 version=profile["version"],
                 os=profile["os"],
                 platform=profile["platform"],
+                login_method=profile.get("login_method", "Login"),
                 user_agent=profile["user_agent"],
                 origin=profile["origin"],
                 template=profile["template"],

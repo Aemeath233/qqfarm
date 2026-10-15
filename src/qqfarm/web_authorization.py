@@ -6,7 +6,7 @@ from datetime import datetime
 from urllib.parse import parse_qs
 
 from qqfarm import wire
-from qqfarm.capture import frame_body, sessions
+from qqfarm.capture import LOGIN_METHODS, frame_body, sessions
 from qqfarm.config import FarmError
 
 
@@ -21,6 +21,7 @@ def inspect_authorization(archive, *, now=None):
     _, url, _, frames = latest
     code = parse_qs(url.query).get("code", [""])[0]
     login_seq = None
+    login_method = None
     login_succeeded = False
     captured_at = None
     for outgoing, raw, headers in frames:
@@ -28,15 +29,20 @@ def inspect_authorization(archive, *, now=None):
         if opcode != 2 or not final or compressed:
             continue
         packet = wire.decode_gate(body)
-        if (packet["service"], packet["method"]) != ("gamepb.userpb.UserService", "Login"):
+        if (
+            packet["service"] != "gamepb.userpb.UserService"
+            or packet["method"] not in LOGIN_METHODS
+        ):
             continue
         if outgoing and packet["type"] == 1:
             if login_seq is not None:
                 raise FarmError("归档包含多个登录请求，请导出只含一次农场登录的会话。")
             login_seq = packet["seq"]
+            login_method = packet["method"]
         elif (
             not outgoing
             and packet["type"] == 2
+            and packet["method"] == login_method
             and login_seq is not None
             and packet["seq"] == login_seq
             and packet["error"] == 0
@@ -55,6 +61,7 @@ def inspect_authorization(archive, *, now=None):
     return {
         "session_count": session_count,
         "latest_login_complete": bool(code and login_seq is not None and login_succeeded),
+        "login_method": login_method,
         "captured_at": captured_at.isoformat() if captured_at else None,
         "age_seconds": int(current - captured_at.timestamp()) if captured_at else None,
         "authorization_fingerprint": hashlib.sha256(code.encode()).hexdigest()[:12]

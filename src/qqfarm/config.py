@@ -33,6 +33,7 @@ class Settings:
     action_delay_max: float = 3
     random_plant_order: bool = False
     maturity_grace_seconds: int = 0
+    login_method: str = "Login"
 
     def __post_init__(self):
         if (

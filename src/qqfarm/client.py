@@ -22,6 +22,7 @@ VISIT = "gamepb.visitpb.VisitService"
 TASK = "gamepb.taskpb.TaskService"
 ALLOWED = {
     (USER, "Login"),
+    (USER, "PlayerLogin"),
     (USER, "Heartbeat"),
     (PLANT, "AllLands"),
     (ITEM, "Bag"),
@@ -189,13 +190,26 @@ class GameClient:
         self.reader = asyncio.create_task(self.receive(), name="farm-reader")
         body = self.settings.login_template
         if body is None:
+            if self.settings.login_method != "Login":
+                raise FarmError("新版登录缺少 SAZ 模板，请重新导入当前抓包。")
             device = wire.text(1, self.settings.client_version) + wire.text(2, self.settings.os_tag)
             body = wire.blob(5, device)
         else:
-            device = wire.parse(wire.data(wire.parse(body), 5))
-            if wire.string(device, 1) != self.settings.client_version:
-                raise FarmError("登录模板与客户端版本不一致，请重新导入当前抓包。")
-        reply = wire.parse(await self.rpc(USER, "Login", body))
+            fields = wire.parse(body)
+            if self.settings.login_method == "Login":
+                device = wire.parse(wire.data(fields, 5))
+                if wire.string(device, 1) != self.settings.client_version:
+                    raise FarmError("登录模板与客户端版本不一致，请重新导入当前抓包。")
+            elif self.settings.login_method == "PlayerLogin":
+                device = wire.parse(wire.data(fields, 3))
+                if (
+                    wire.string(device, 1) != self.settings.client_version
+                    or wire.string(device, 2) != self.settings.os_tag
+                ):
+                    raise FarmError("新版登录模板的版本或系统信息不一致，请重新导入当前抓包。")
+            else:
+                raise FarmError("SAZ 中的登录接口不受支持，请重新导入当前抓包。")
+        reply = wire.parse(await self.rpc(USER, self.settings.login_method, body))
         basic = wire.parse(wire.data(reply, 1))
         self.gid, self.gold = wire.number(basic, 1), wire.number(basic, 5)
         self.player_name = wire.string(basic, 2)[:80]

@@ -326,6 +326,7 @@ class FarmService:
                 settings = Settings(
                     profile["code"],
                     client_version=profile["version"],
+                    login_method=profile.get("login_method", "Login"),
                     os_tag=profile.get("os", "Windows"),
                     data_dir=self.root,
                     wasm_path=self.root / "tsdk.wasm",

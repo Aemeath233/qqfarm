@@ -12,6 +12,8 @@ from qqfarm import wire
 from qqfarm.audit import tag
 from qqfarm.config import FarmError
 
+LOGIN_METHODS = {"Login", "PlayerLogin"}
+
 
 def records(payload, *, include_headers=False):
     offset = 0
@@ -112,6 +114,7 @@ def authorization_from_capture(path, crypto, *, max_age=None):
         raise FarmError("捕获的连接没有登录 code。")
     template = None
     login_seq = None
+    login_method = None
     owner = 0
     friend_open_ids = []
     for outbound, raw in frames:
@@ -134,19 +137,36 @@ def authorization_from_capture(path, crypto, *, max_age=None):
                 for value in friend_open_ids
             ):
                 raise FarmError("好友同步资料异常。")
-        if packet["service"] != "gamepb.userpb.UserService" or packet["method"] != "Login":
+        if (
+            packet["service"] != "gamepb.userpb.UserService"
+            or packet["method"] not in LOGIN_METHODS
+        ):
             continue
         if outbound and packet["type"] == 1:
             if template is not None:
                 raise FarmError("归档包含多个登录请求，请导出只含一次农场登录的 Fiddler 会话。")
             login_seq = packet["seq"]
+            login_method = packet["method"]
             template = crypto.decrypt(packet["body"])
-            wire.parse(template)
+            request = wire.parse(template)
+            if login_method == "PlayerLogin":
+                device = wire.parse(wire.data(request, 3))
+                if (
+                    wire.string(device, 1) != query.get("ver", [""])[0]
+                    or wire.string(device, 2) != query.get("os", ["Windows"])[0]
+                ):
+                    raise FarmError("新版登录模板的版本或系统信息与 SAZ 不一致。")
         elif not outbound and packet["type"] == 2:
-            if packet["seq"] != login_seq or packet["error"] != 0:
+            if (
+                packet["method"] != login_method
+                or packet["seq"] != login_seq
+                or packet["error"] != 0
+            ):
                 continue
-            if code.startswith("-") or len(code) > 8192 or any(
-                char.isspace() or ord(char) < 32 for char in code
+            if (
+                code.startswith("-")
+                or len(code) > 8192
+                or any(char.isspace() or ord(char) < 32 for char in code)
             ):
                 raise FarmError("Fiddler 会话中的临时授权格式不正确。")
             if not template:
@@ -157,6 +177,7 @@ def authorization_from_capture(path, crypto, *, max_age=None):
         raise FarmError("归档没有完整的成功登录及客户端模板。")
     profile = {
         "code": code,
+        "login_method": login_method,
         "version": query.get("ver", [""])[0],
         "os": query.get("os", ["Windows"])[0],
         "platform": query.get("platform", ["qq"])[0],
@@ -178,6 +199,7 @@ def settings_from_capture(path: Path, paths, *, max_age=300):
     return replace(
         paths.game_settings(profile["code"]),
         client_version=profile["version"],
+        login_method=profile.get("login_method", "Login"),
         os_tag=profile["os"],
         platform=profile["platform"],
         user_agent=profile["user_agent"],
