@@ -11,7 +11,7 @@ from qqfarm.config import FarmError, Settings
 from qqfarm.friend_stats import day_key
 from qqfarm.web_api import create_app
 from qqfarm.web_policy import Policy
-from qqfarm.web_service import FarmService, friend_body
+from qqfarm.web_service import FarmService, FriendInteractionPaused, friend_body
 
 HEADERS = {"X-Farm-Action": "personal-control"}
 PASSWORD = "local-panel-test-password"
@@ -314,7 +314,7 @@ async def test_friend_insect_reply_without_lands_uses_read_only_verification(tmp
         service.audit.close()
 
 
-async def test_friend_insect_unconfirmed_after_revisit_stops_without_retry(tmp_path):
+async def test_friend_insect_unconfirmed_after_revisit_pauses_only_that_kind(tmp_path):
     service = FarmService(tmp_path)
     service.friends = [{"id": 12345}]
 
@@ -329,12 +329,13 @@ async def test_friend_insect_unconfirmed_after_revisit_stops_without_retry(tmp_p
         rpc=AsyncMock(side_effect=rpc),
     )
     try:
-        with pytest.raises(UncertainOutcome):
+        with pytest.raises(FriendInteractionPaused, match="已暂停放虫"):
             await service.friend_locked("insects", 12345)
         assert [call.args[1] for call in service.client.rpc.await_args_list].count(
             "PutInsects"
         ) == 1
         assert service.metrics["friend_actions"] == 0
+        assert "insects" in service.friend_stats.blocks(service.audit.account, 1000)
     finally:
         service.audit.close()
 
@@ -366,6 +367,28 @@ async def test_friend_cycle_never_targets_own_account(tmp_path):
     service.friend_locked = AsyncMock()
     try:
         await service.friend_cycle(Policy(friend_insects=True, friends_scope="all"))
+        service.friend_locked.assert_awaited_once_with("insects", 12345)
+    finally:
+        service.audit.close()
+
+
+async def test_paused_friend_kind_does_not_stop_own_farm_schedule(tmp_path):
+    service = FarmService(tmp_path)
+    service.running = True
+    service.client = SimpleNamespace(
+        gid=7,
+        closed=False,
+        fault=None,
+        server_now=lambda: 1000,
+        settings=Settings("test"),
+        allow_writes=False,
+    )
+    service.friends = [{"id": 12345}]
+    service.friend_locked = AsyncMock(side_effect=FriendInteractionPaused("状态未确认"))
+    try:
+        await service.friend_cycle(Policy(friend_insects=True, insects_priority=[12345]))
+        assert service.running
+        assert not service.client.allow_writes
         service.friend_locked.assert_awaited_once_with("insects", 12345)
     finally:
         service.audit.close()

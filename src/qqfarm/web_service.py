@@ -1254,17 +1254,59 @@ class FarmService:
                         try:
                             latest = await self.read_friend_lands(friend_id, revisit=True)
                         except Exception as verify_error:
-                            raise UncertainOutcome(
-                                f"{method} 回包缺少地块，复查失败；已停止，不会重复操作。"
-                            ) from verify_error
+                            if getattr(c, "fault", None) or getattr(
+                                getattr(c, "disconnected", None), "is_set", lambda: False
+                            )():
+                                raise UncertainOutcome(
+                                    f"{method} 回包缺少地块且连接失效；已停止，不会重复操作。"
+                                ) from verify_error
+                            reason = (
+                                "好友放虫结果无法复查；已暂停放虫，其他挂机继续。请在游戏核对后恢复。"
+                                if kind == "insects"
+                                else (
+                                    "好友放草结果无法复查；已暂停放草，其他挂机继续。"
+                                    "请在游戏核对后恢复。"
+                                )
+                            )
+                            self.friend_stats.block(self.audit.account, kind, reason)
+                            self.audit.record(
+                                "interaction_verification",
+                                "unconfirmed",
+                                method=method,
+                                target_count=len(ids),
+                                reply_bytes=len(response),
+                                verification_error=type(verify_error).__name__,
+                            )
+                            raise FriendInteractionPaused(reason) from verify_error
                         owners = "insect_owners" if kind == "insects" else "weed_owners"
-                        if any(
-                            key not in latest or c.gid not in getattr(latest[key], owners)
-                            for key in ids
-                        ):
-                            raise UncertainOutcome(
-                                f"{method} 回包和复查均未确认操作结果；已停止，不会重复操作。"
-                            ) from exc
+                        owned = [
+                            key for key in ids
+                            if key in latest and c.gid in getattr(latest[key], owners)
+                        ]
+                        if len(owned) != len(ids):
+                            reason = (
+                                "好友放虫未能确认全部目标；已暂停放虫，其他挂机继续。请在游戏核对后恢复。"
+                                if kind == "insects"
+                                else (
+                                    "好友放草未能确认全部目标；已暂停放草，其他挂机继续。"
+                                    "请在游戏核对后恢复。"
+                                )
+                            )
+                            self.friend_stats.block(self.audit.account, kind, reason)
+                            self.audit.record(
+                                "interaction_verification",
+                                "unconfirmed",
+                                method=method,
+                                target_count=len(ids),
+                                returned_count=sum(key in latest for key in ids),
+                                own_marker_count=len(owned),
+                                any_marker_count=sum(
+                                    bool(getattr(latest[key], owners))
+                                    for key in ids if key in latest
+                                ),
+                                reply_bytes=len(response),
+                            )
+                            raise FriendInteractionPaused(reason) from exc
                         rows.update(latest)
                         self.audit.record(
                             "interaction_verification", "confirmed", method=method, plots=ids
