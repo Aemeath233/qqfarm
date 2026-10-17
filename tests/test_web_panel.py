@@ -152,12 +152,45 @@ async def test_unconfirmed_claim_does_not_count_as_success(tmp_path):
     service.client = SimpleNamespace(
         closed=False,
         fault=None,
-        rpc=AsyncMock(side_effect=[wire.blob(1, wire.blob(3, task())), b""]),
+        rpc=AsyncMock(
+            side_effect=[
+                wire.blob(1, wire.blob(3, task())),
+                b"",
+                wire.blob(1, wire.blob(3, task())),
+            ]
+        ),
     )
     try:
         with pytest.raises(UncertainOutcome):
             await service.claim_locked(1)
         assert service.metrics["claimed"] == 0
+        assert [call.args[1] for call in service.client.rpc.await_args_list] == [
+            "TaskInfo", "ClaimTaskReward", "TaskInfo"
+        ]
+    finally:
+        service.audit.close()
+
+
+async def test_claim_missing_reply_state_is_confirmed_by_task_query(tmp_path):
+    service = FarmService(tmp_path)
+    service.client = SimpleNamespace(
+        closed=False,
+        fault=None,
+        rpc=AsyncMock(
+            side_effect=[
+                wire.blob(1, wire.blob(3, task())),
+                b"",
+                wire.blob(1, wire.blob(3, task(claimed=True))),
+            ]
+        ),
+    )
+    try:
+        await service.claim_locked(1)
+        assert service.metrics["claimed"] == 1
+        assert service.tasks[0]["claimed"]
+        assert [call.args[1] for call in service.client.rpc.await_args_list] == [
+            "TaskInfo", "ClaimTaskReward", "TaskInfo"
+        ]
     finally:
         service.audit.close()
 
@@ -249,6 +282,59 @@ async def test_friend_identity_mismatch_is_not_followed_by_any_write(tmp_path):
         with pytest.raises(FarmError):
             await service.friend_locked("weeds", 12345)
         assert [call.args[1] for call in service.client.rpc.await_args_list] == ["Enter", "Leave"]
+    finally:
+        service.audit.close()
+
+
+async def test_friend_insect_reply_without_lands_uses_read_only_verification(tmp_path):
+    service = FarmService(tmp_path)
+    service.friends = [{"id": 12345}]
+    entries = 0
+
+    async def rpc(_service, method, body=b""):
+        nonlocal entries
+        if method == "Enter":
+            entries += 1
+            return wire.blob(1, wire.uint(1, 12345)) + wire.blob(
+                2, land_payload(insects=entries > 1)
+            )
+        assert method in {"PutInsects", "Leave"}
+        return b""
+
+    service.client = SimpleNamespace(
+        gid=7, closed=False, fault=None, server_now=lambda: 1000,
+        rpc=AsyncMock(side_effect=rpc),
+    )
+    try:
+        await service.friend_locked("insects", 12345)
+        methods = [call.args[1] for call in service.client.rpc.await_args_list]
+        assert methods == ["Enter", "PutInsects", "Leave", "Enter", "Leave"]
+        assert service.metrics["friend_actions"] == 1
+    finally:
+        service.audit.close()
+
+
+async def test_friend_insect_unconfirmed_after_revisit_stops_without_retry(tmp_path):
+    service = FarmService(tmp_path)
+    service.friends = [{"id": 12345}]
+
+    async def rpc(_service, method, body=b""):
+        if method == "Enter":
+            return wire.blob(1, wire.uint(1, 12345)) + wire.blob(2, land_payload())
+        assert method in {"PutInsects", "Leave"}
+        return b""
+
+    service.client = SimpleNamespace(
+        gid=7, closed=False, fault=None, server_now=lambda: 1000,
+        rpc=AsyncMock(side_effect=rpc),
+    )
+    try:
+        with pytest.raises(UncertainOutcome):
+            await service.friend_locked("insects", 12345)
+        assert [call.args[1] for call in service.client.rpc.await_args_list].count(
+            "PutInsects"
+        ) == 1
+        assert service.metrics["friend_actions"] == 0
     finally:
         service.audit.close()
 

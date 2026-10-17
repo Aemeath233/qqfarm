@@ -26,6 +26,7 @@ const operationNames = {
   purchase: "购买种子",
   sell: "出售",
   claim_task: "领取任务",
+  claim_verification: "领奖复查",
   care: "照料农场",
   scheduler: "自动调度",
   heartbeat: "心跳",
@@ -35,6 +36,7 @@ const operationNames = {
   friend_insects: "放虫",
   friend_weeds: "放草",
   care_verification: "照料结果复查",
+  interaction_verification: "互动结果复查",
   friend_visit_leave: "离开好友农场",
   action_delay: "操作等待",
 };

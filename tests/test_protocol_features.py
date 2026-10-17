@@ -207,12 +207,20 @@ async def test_partial_batch_task_confirmation_stops_without_retry(tmp_path):
     service.client = SimpleNamespace(
         closed=False,
         fault=None,
-        rpc=AsyncMock(side_effect=[before, wire.blob(2, wire.blob(3, task(1, claimed=True)))]),
+        rpc=AsyncMock(
+            side_effect=[
+                before,
+                wire.blob(2, wire.blob(3, task(1, claimed=True))),
+                before,
+            ]
+        ),
     )
     try:
         with pytest.raises(UncertainOutcome):
             await service.claim_locked(None)
-        assert service.client.rpc.await_count == 2
+        assert [call.args[1] for call in service.client.rpc.await_args_list] == [
+            "TaskInfo", "BatchClaimTaskReward", "TaskInfo"
+        ]
         assert service.metrics["claimed"] == 0
     finally:
         service.audit.close()

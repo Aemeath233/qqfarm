@@ -756,7 +756,12 @@ class FarmService:
                 if action == "sell":
                     self.bag = catalog.inventory(await c.rpc(ITEM, "Bag"))
                 self.updated_at = time.time()
-            except (UncertainOutcome, wire.ProtocolError):
+            except UncertainOutcome as exc:
+                self.note = f"{exc} 农场连接已断开，请重新授权并核对游戏状态。"
+                await self.disconnect()
+                raise
+            except wire.ProtocolError:
+                self.note = "游戏回包格式异常，农场连接已断开；请重新授权并核对游戏状态。"
                 await self.disconnect()
                 raise
             except RPCError as exc:
@@ -843,15 +848,34 @@ class FarmService:
         method = "BatchClaimTaskReward" if len(ids) > 1 else "ClaimTaskReward"
         body = wire.packed(1, ids) if len(ids) > 1 else wire.uint(1, ids[0]) + wire.uint(2, 0)
         self.progress(operation_id, f"领取 {len(ids)} 项任务奖励")
-        response = wire.parse(await c.rpc(TASK, method, body))
+        response_body = await c.rpc(TASK, method, body)
         self.progress(operation_id, "核对领取回包")
-        updated = catalog.tasks(wire.data(response, 2), nested=False)
+        try:
+            updated = catalog.tasks(wire.data(wire.parse(response_body), 2), nested=False)
+        except wire.ProtocolError:
+            updated = []
         confirmed = {task["id"] for task in updated if task["claimed"]}
-        if not set(ids).issubset(confirmed):
-            raise UncertainOutcome("领取回包未确认全部任务状态，已暂停，不能自动重领。")
-        by_id = {task["id"]: task for task in self.tasks}
-        by_id.update({task["id"]: task for task in updated})
-        self.tasks = list(by_id.values())
+        if set(ids).issubset(confirmed):
+            by_id = {task["id"]: task for task in self.tasks}
+            by_id.update({task["id"]: task for task in updated})
+            self.tasks = list(by_id.values())
+        else:
+            # A successful transport reply may omit task states. Read once to
+            # verify the write instead of sending a second reward request.
+            self.progress(operation_id, "回包未列出全部状态，重新查询任务")
+            self.audit.record("claim_verification", "started", tasks=ids)
+            try:
+                await self.refresh_tasks_locked()
+            except Exception as exc:
+                raise UncertainOutcome(
+                    "领奖回包未完整确认，复查任务失败；已停止，不会自动重领。"
+                ) from exc
+            confirmed = {task["id"] for task in self.tasks if task["claimed"]}
+            if not set(ids).issubset(confirmed):
+                raise UncertainOutcome(
+                    "领奖回包和任务复查均未确认全部领取状态；已停止，不会自动重领。"
+                )
+            self.audit.record("claim_verification", "confirmed", tasks=ids)
         for task in candidates:
             self.audit.record("claim_task", "confirmed", task=task["id"])
 
@@ -1216,7 +1240,35 @@ class FarmService:
                     if not confirmed:
                         continue
                 else:
-                    FarmEngine.updated_batch(rows, response, ids)
+                    try:
+                        FarmEngine.updated_batch(rows, response, ids)
+                    except (FarmError, wire.ProtocolError) as exc:
+                        if kind not in {"insects", "weeds"}:
+                            raise
+                        # Some successful replies omit the affected lands. Check
+                        # that this account appears on every target before counting
+                        # the action; never send the write a second time.
+                        self.audit.record(
+                            "interaction_verification", "started", method=method, plots=ids
+                        )
+                        try:
+                            latest = await self.read_friend_lands(friend_id, revisit=True)
+                        except Exception as verify_error:
+                            raise UncertainOutcome(
+                                f"{method} 回包缺少地块，复查失败；已停止，不会重复操作。"
+                            ) from verify_error
+                        owners = "insect_owners" if kind == "insects" else "weed_owners"
+                        if any(
+                            key not in latest or c.gid not in getattr(latest[key], owners)
+                            for key in ids
+                        ):
+                            raise UncertainOutcome(
+                                f"{method} 回包和复查均未确认操作结果；已停止，不会重复操作。"
+                            ) from exc
+                        rows.update(latest)
+                        self.audit.record(
+                            "interaction_verification", "confirmed", method=method, plots=ids
+                        )
                 self.merge_limits(catalog.limits(response, 4 if method == "Harvest" else 2))
                 for plot in ids:
                     plot = rows[plot]
