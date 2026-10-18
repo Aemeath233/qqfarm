@@ -95,7 +95,11 @@ class FarmService:
         self.updated_at = 0
         self.full_refresh_at = 0
         self.next_check = 0
+        self.next_friend_check = 0
         self.friend_notes = {}
+        self.friend_maturities = {}
+        self.friend_cursor = {}
+        self.friend_summary_at = 0
         self.task_note = ""
         self.note = "尚未连接，请导入本账号农场授权"
         self.mode = "offline"
@@ -213,6 +217,7 @@ class FarmService:
             "snapshot_fresh": live,
             "server_now": now,
             "next_check": self.next_check,
+            "next_friend_check": self.next_friend_check,
             "player": self.player,
             "metrics": self.metrics,
             "policy": self.policy.model_dump(),
@@ -288,11 +293,15 @@ class FarmService:
     def reset_farm_state(self):
         self.rows, self.seeds, self.bag, self.friends, self.tasks = {}, [], [], [], []
         self.friend_notes.clear()
+        self.friend_maturities.clear()
+        self.friend_cursor.clear()
+        self.friend_summary_at = 0
         self.task_note = ""
         self.limits.clear()
         self.planting_decisions = []
         self.planted_this_round.clear()
         self.updated_at = self.full_refresh_at = self.next_check = self.task_check_at = 0
+        self.next_friend_check = 0
         self.profile = None
         self.audit.account = ""
         self.player = {"name": "未连接", "level": 0, "gold": 0, "fingerprint": ""}
@@ -460,6 +469,7 @@ class FarmService:
             self.audit.record("friend_list", "unavailable")
         self.updated_at = time.time()
         self.full_refresh_at = self.updated_at
+        self.friend_summary_at = self.updated_at
 
     async def refresh(self):
         async with self.guard:
@@ -482,12 +492,14 @@ class FarmService:
         self.stop.clear()
         self.policy_changed.clear()
         self.running, self.mode, self.note = True, "running", "自动种收已启动"
+        self.next_friend_check = 0
         self.reward_changed.set()
         self.loop = asyncio.create_task(self.schedule())
 
     async def pause(self):
         self.operation_epoch += 1
         self.running = False
+        self.next_friend_check = 0
         self.stop.set()
         self.reward_changed.set()
         if self.client:
@@ -514,6 +526,7 @@ class FarmService:
             self.lock = None
         self.running = False
         self.next_check = 0
+        self.next_friend_check = 0
         self.mode = "offline"
 
     def choose_seed(self, policy):
@@ -534,6 +547,7 @@ class FarmService:
                 if self.policy_changed.is_set():
                     self.policy_changed.clear()
                     own_due = friend_due = 0
+                    self.next_friend_check = 0
                 async with self.guard:
                     c = self.require_client()
                     c.allow_writes = self.running
@@ -644,7 +658,8 @@ class FarmService:
                     self.note = "自动运行中，按成熟时间检查；心跳独立维护"
                 if friends_enabled and now >= friend_due:
                     await self.friend_cycle(policy)
-                    friend_due = time.time() + policy.friend_interval
+                    friend_due = self.next_friend_due(policy)
+                    self.next_friend_check = friend_due
                 deadlines = [own_due]
                 if friends_enabled:
                     deadlines.append(friend_due)
@@ -675,6 +690,7 @@ class FarmService:
                 await self.disconnect()
         finally:
             self.running = False
+            self.next_friend_check = 0
             self.reward_changed.set()
             if self.client:
                 self.client.allow_writes = False
@@ -731,11 +747,18 @@ class FarmService:
                 raise OperationPaused("已暂停，取消排队中的操作。")
             c = self.require_client()
             c.allow_writes = True
+            friend_check = action == "friend" and arguments.get("kind") in {"steal", "help"}
             c.settings = replace(
                 c.settings,
                 random_action_delays=self.policy.random_action_delays,
-                action_delay_min=self.policy.action_delay_min,
-                action_delay_max=self.policy.action_delay_max,
+                action_delay_min=(
+                    self.policy.friend_action_delay_min
+                    if friend_check else self.policy.action_delay_min
+                ),
+                action_delay_max=(
+                    self.policy.friend_action_delay_max
+                    if friend_check else self.policy.action_delay_max
+                ),
             )
             try:
                 self.progress(operation_id, "正在执行")
@@ -951,7 +974,23 @@ class FarmService:
         fields = wire.parse(payload)
         if wire.number(wire.parse(wire.data(fields, 1)), 1) != friend_id:
             raise FarmError("好友农场身份与请求不匹配，未执行互动。")
-        return {plot.id: plot for plot in (models.land(v) for v in fields.get(2, []))}
+        plots = [models.land(value) for value in fields.get(2, [])]
+        rows = {plot.id: plot for plot in plots}
+        if len(rows) != len(plots):
+            raise FarmError("好友土地记录重复，未执行互动。")
+        now = c.server_now()
+        future = [
+            plot.mature_at
+            for plot in rows.values()
+            if plot.stealable and plot.mature_at and plot.mature_at > now and not plot.master_id
+        ]
+        if future:
+            # Recheck shortly after the observed maturity; periodic patrols may
+            # replace this appointment if a friend fertilizes the crop.
+            self.friend_maturities[friend_id] = time.time() + min(future) - now + 5
+        else:
+            self.friend_maturities.pop(friend_id, None)
+        return rows
 
     async def confirm_care(self, rows, payload, ids, *, friend_id=None):
         try:
@@ -997,8 +1036,99 @@ class FarmService:
         )
         return False
 
+    def next_friend_due(self, policy):
+        now = time.time()
+        regular = now + policy.friend_interval
+        if not policy.friend_steal or "steal" in self.friend_stats.blocks(
+            self.audit.account, self.client.server_now()
+        ):
+            return regular
+        allowed = (
+            {friend["id"] for friend in self.friends}
+            if policy.friends_scope == "all"
+            else set(policy.steal_priority)
+        )
+        appointments = [
+            due for friend_id, due in self.friend_maturities.items() if friend_id in allowed
+        ]
+        return min(regular, max(now + 1, min(appointments))) if appointments else regular
+
+    def friend_batch(self, kind, priority, maximum):
+        if not priority:
+            return []
+        cursor = self.friend_cursor.get(kind, 0) % len(priority)
+        ordered = priority[cursor:] + priority[:cursor]
+        selected = ordered[:maximum]
+        self.friend_cursor[kind] = (cursor + len(selected)) % len(priority)
+        if selected and kind in {"steal", "help"}:
+            hints = {friend["id"]: friend for friend in self.friends}
+            urgent = next(
+                (
+                    friend_id
+                    for friend_id in ordered[maximum:]
+                    if kind == "steal"
+                    and self.friend_maturities.get(friend_id, float("inf")) <= time.time() + 5
+                ),
+                None,
+            )
+            hinted = next(
+                (
+                    friend_id
+                    for friend_id in ordered[maximum:]
+                    if (
+                        hints.get(friend_id, {}).get("stealable_plots", 0) > 0
+                        if kind == "steal"
+                        else any(
+                            hints.get(friend_id, {}).get(field, 0) > 0
+                            for field in ("dry_plots", "weed_plots", "bug_plots")
+                        )
+                    )
+                ),
+                None,
+            )
+            if urgent is not None:
+                selected = [urgent, *selected[:-1]]
+            elif hinted is not None:
+                selected[-1] = hinted
+            if kind == "steal":
+                due_now = [
+                    friend_id for friend_id in selected
+                    if self.friend_maturities.get(friend_id, float("inf")) <= time.time() + 5
+                ]
+                selected = due_now + [
+                    friend_id for friend_id in selected if friend_id not in due_now
+                ]
+        return selected
+
+    async def refresh_friend_hints(self, interval):
+        if not self.friends or time.time() - self.friend_summary_at < interval:
+            return
+        self.friend_summary_at = time.time()
+        async with self.guard:
+            client = self.require_client()
+            try:
+                land_reply = await client.rpc(PLANT, "AllLands")
+                self.merge_limits(catalog.limits(land_reply))
+            except (RPCError, wire.ProtocolError) as exc:
+                self.audit.record("friend_quota", "unavailable", error=type(exc).__name__)
+            try:
+                ids = [friend["id"] for friend in self.friends]
+                payload = await client.rpc(FRIEND, "GetGameFriends", wire.packed(1, ids))
+                summaries = catalog.friends(payload)
+                by_id = {friend["id"]: friend for friend in self.friends}
+                for summary in summaries:
+                    if summary["id"] in by_id:
+                        for field in (
+                            "stealable_plots", "dry_plots", "weed_plots", "bug_plots"
+                        ):
+                            by_id[summary["id"]][field] = summary[field]
+                        by_id[summary["id"]]["checked_at"] = time.time()
+            except (RPCError, wire.ProtocolError) as exc:
+                self.audit.record("friend_summary", "unavailable", error=type(exc).__name__)
+
     async def friend_cycle(self, policy):
-        for kind in ("help", "steal", "insects", "weeds"):
+        await self.refresh_friend_hints(policy.friend_interval)
+        for kind in ("steal", "help", "insects", "weeds"):
             if not getattr(policy, "friend_" + kind):
                 continue
             if kind in self.friend_stats.blocks(self.audit.account, self.client.server_now()):
@@ -1008,7 +1138,7 @@ class FarmService:
             priority = list(getattr(policy, kind + "_priority"))
             if policy.friends_scope == "all":
                 priority += [f["id"] for f in self.friends if f["id"] not in priority]
-            for gid in priority[: policy.friends_per_cycle]:
+            for gid in self.friend_batch(kind, priority, policy.friends_per_cycle):
                 if gid == self.client.gid:
                     continue
                 if not self.running:
@@ -1022,8 +1152,14 @@ class FarmService:
                         c.settings = replace(
                             c.settings,
                             random_action_delays=policy.random_action_delays,
-                            action_delay_min=policy.action_delay_min,
-                            action_delay_max=policy.action_delay_max,
+                            action_delay_min=(
+                                policy.friend_action_delay_min
+                                if kind in {"help", "steal"} else policy.action_delay_min
+                            ),
+                            action_delay_max=(
+                                policy.friend_action_delay_max
+                                if kind in {"help", "steal"} else policy.action_delay_max
+                            ),
                         )
                         try:
                             await self.friend_locked(kind, gid)
@@ -1107,34 +1243,71 @@ class FarmService:
                 else [(FRIEND_METHODS[kind][0], FRIEND_METHODS[kind][1], None)]
             )
             for method, limit_id, selector in actions:
-                ids = []
-                for plot in rows.values():
-                    state = plot.status(c.server_now(), allow_shared=True)
-                    if kind == "help":
-                        eligible = state in {"growing", "mature"} and selector(plot)
-                    elif kind == "steal":
-                        eligible = state == "mature" and plot.stealable and plot.left_fruit > 0
-                    else:
-                        eligible = state == "growing" and not (
-                            plot.insect_owners if kind == "insects" else plot.weed_owners
+                def candidates(lands, method=method, limit_id=limit_id, selector=selector):
+                    selected = []
+                    for plot in lands.values():
+                        state = plot.status(c.server_now(), allow_shared=True)
+                        if kind == "help":
+                            eligible = state in {"growing", "mature"} and selector(plot)
+                        elif kind == "steal":
+                            eligible = state == "mature" and plot.stealable and plot.left_fruit > 0
+                        else:
+                            eligible = state == "growing" and not (
+                                plot.insect_owners if kind == "insects" else plot.weed_owners
+                            )
+                        identity = (
+                            f"{c.gid}:{friend_id}:{plot.id}:{plot.plant_id}:"
+                            f"{plot.mature_at}:{method}"
                         )
-                    identity = (
-                        f"{c.gid}:{friend_id}:{plot.id}:{plot.plant_id}:{plot.mature_at}:{method}"
-                    )
-                    if eligible and (
-                        kind == "help"
-                        or not self.audit.db.execute(
-                            "SELECT 1 FROM friend_effects WHERE identity=?", (identity,)
-                        ).fetchone()
-                    ):
-                        ids.append(plot.id)
-                if method == "Farming":
-                    allowed = set(self.care_ids(rows, c.server_now()))
-                    ids = [key for key in ids if key in allowed]
-                else:
-                    ids = self.limited_ids(limit_id, ids)
+                        if eligible and (
+                            kind == "help"
+                            or not self.audit.db.execute(
+                                "SELECT 1 FROM friend_effects WHERE identity=?", (identity,)
+                            ).fetchone()
+                        ):
+                            selected.append(plot.id)
+                    if method == "Farming":
+                        allowed = set(self.care_ids(lands, c.server_now()))
+                        return [key for key in selected if key in allowed]
+                    return self.limited_ids(limit_id, selected)
+
+                ids = candidates(rows)
                 if not ids:
                     continue
+                if kind in {"help", "steal"} and getattr(
+                    getattr(c, "settings", None), "random_action_delays", False
+                ):
+                    # Wait before the final read, so a long random delay cannot
+                    # turn a once-mature plot into a stale write target.
+                    await c.pace_write(method)
+                    previous = rows
+                    rows = await self.read_friend_lands(friend_id, revisit=True)
+                    fresh = set(candidates(rows))
+                    skipped = [key for key in ids if key not in fresh]
+                    if skipped:
+                        self.audit.record(
+                            "friend_" + kind,
+                            "skipped",
+                            friend=tag(friend_id),
+                            plots=skipped,
+                            reason="随机等待后复查发现目标状态已变化，未发送操作。",
+                        )
+                        if kind == "steal":
+                            for key in skipped:
+                                plot = previous[key]
+                                identity = (
+                                    f"{c.gid}:{friend_id}:{key}:{plot.plant_id}:"
+                                    f"{plot.mature_at}:{method}"
+                                )
+                                self.audit.db.execute(
+                                    "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
+                                    (identity, time.time()),
+                                )
+                            self.audit.db.commit()
+                    ids = [key for key in ids if key in fresh]
+                    c.settings = replace(c.settings, random_action_delays=False)
+                    if not ids:
+                        continue
                 identities = {
                     key: f"{c.gid}:{friend_id}:{key}:{rows[key].plant_id}:"
                     f"{rows[key].mature_at}:{method}"
@@ -1187,6 +1360,13 @@ class FarmService:
                             plots=ids,
                             reason=reason,
                         )
+                        if kind == "steal":
+                            for identity in identities.values():
+                                self.audit.db.execute(
+                                    "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
+                                    (identity, time.time()),
+                                )
+                            self.audit.db.commit()
                         rows = await self.read_friend_lands(friend_id, revisit=True)
                         continue
                     if kind not in {"help", "steal"} or exc.method != method:

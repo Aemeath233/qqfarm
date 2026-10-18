@@ -29,13 +29,17 @@ class Policy(BaseModel):
     insects_priority: list[int] = Field(default_factory=list, max_length=200)
     weeds_priority: list[int] = Field(default_factory=list, max_length=200)
     friends_scope: Literal["selected", "all"] = "selected"
-    friend_interval: int = Field(default=300, ge=60, le=3600)
+    friend_interval: int = Field(default=360, ge=60, le=3600)
     friends_per_cycle: int = Field(default=3, ge=1, le=10)
+    friend_action_delay_min: float = Field(default=5, ge=1, le=30)
+    friend_action_delay_max: float = Field(default=20, ge=1, le=30)
 
     @model_validator(mode="after")
     def valid_timing(self):
         if self.action_delay_min > self.action_delay_max:
             raise ValueError("操作间隔下限不能超过上限")
+        if self.friend_action_delay_min > self.friend_action_delay_max:
+            raise ValueError("好友操作等待下限不能超过上限")
         return self
 
     @field_validator(

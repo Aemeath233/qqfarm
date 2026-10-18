@@ -58,4 +58,12 @@ export function validatePolicy(value) {
   ) {
     throw new Error("随机等待应为 1 到 10 秒，下限不能大于上限");
   }
+  if (
+    ![value.friend_action_delay_min, value.friend_action_delay_max].every(
+      (v) => typeof v === "number" && Number.isFinite(v) && v >= 1 && v <= 30,
+    ) ||
+    value.friend_action_delay_min > value.friend_action_delay_max
+  ) {
+    throw new Error("采摘和帮助前等待应为 1 到 30 秒，下限不能大于上限");
+  }
 }

@@ -1,6 +1,6 @@
 [project]
 name = "qqfarm"
-version = "0.6.8"
+version = "0.6.9"
 description = "QQ 农场网页挂机工具，可在本机或服务器运行"
 readme = "README.md"
 requires-python = ">=3.12"

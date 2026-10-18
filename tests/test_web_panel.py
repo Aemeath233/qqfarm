@@ -1,4 +1,5 @@
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from qqfarm import wire
-from qqfarm.client import UncertainOutcome
+from qqfarm.client import RPCError, UncertainOutcome
 from qqfarm.config import FarmError, Settings
 from qqfarm.friend_stats import day_key
 from qqfarm.web_api import create_app
@@ -236,13 +237,15 @@ async def test_sale_preserves_stack_uid_in_captured_field_six(tmp_path):
         service.audit.close()
 
 
-def land_payload(*, insects=False):
+def land_payload(*, insects=False, mature_at=2000, stealable=False, left_fruit=0):
     plant = wire.uint(1, 1020002) + wire.text(2, "白萝卜")
     plant += wire.blob(4, wire.uint(1, 1) + wire.uint(2, 1)) + wire.blob(
-        4, wire.uint(1, 6) + wire.uint(2, 2000)
+        4, wire.uint(1, 6) + wire.uint(2, mature_at)
     )
     if insects:
         plant += wire.packed(13, [7])
+    if stealable:
+        plant += wire.uint(16, 1) + wire.uint(18, left_fruit)
     return wire.uint(1, 15) + wire.uint(2, 1) + wire.blob(10, plant)
 
 
@@ -364,6 +367,7 @@ async def test_friend_cycle_never_targets_own_account(tmp_path):
         settings=Settings("test"),
     )
     service.friends = [{"id": 7}, {"id": 12345}]
+    service.friend_summary_at = time.time()
     service.friend_locked = AsyncMock()
     try:
         await service.friend_cycle(Policy(friend_insects=True, friends_scope="all"))
@@ -384,11 +388,176 @@ async def test_paused_friend_kind_does_not_stop_own_farm_schedule(tmp_path):
         allow_writes=False,
     )
     service.friends = [{"id": 12345}]
+    service.friend_summary_at = time.time()
     service.friend_locked = AsyncMock(side_effect=FriendInteractionPaused("状态未确认"))
     try:
         await service.friend_cycle(Policy(friend_insects=True, insects_priority=[12345]))
         assert service.running
         assert not service.client.allow_writes
         service.friend_locked.assert_awaited_once_with("insects", 12345)
+    finally:
+        service.audit.close()
+
+
+def test_friend_batches_rotate_and_include_due_crop(tmp_path):
+    service = FarmService(tmp_path)
+    try:
+        priority = [11, 22, 33, 44, 55]
+        assert service.friend_batch("steal", priority, 2) == [11, 22]
+        service.friend_maturities[55] = time.time() + 3
+        assert service.friend_batch("steal", priority, 2) == [55, 33]
+        assert service.friend_batch("help", priority, 2) == [11, 22]
+        assert service.friend_batch("help", priority, 2) == [33, 44]
+        service.friend_cursor["steal"] = 0
+        service.friend_maturities = {22: time.time() + 3}
+        assert service.friend_batch("steal", priority, 2) == [22, 11]
+        service.friend_maturities.clear()
+        service.friend_cursor["steal"] = 0
+        service.friends = [{"id": 55, "stealable_plots": 4}]
+        assert service.friend_batch("steal", priority, 2) == [11, 55]
+    finally:
+        service.audit.close()
+
+
+async def test_friend_summary_refresh_preserves_names_and_prioritizes_hints(tmp_path):
+    service = FarmService(tmp_path)
+    service.friends = [{"id": 55, "name": "原名称", "stealable_plots": 0}]
+    payload = wire.blob(1, wire.uint(1, 55) + wire.blob(9, wire.uint(6, 4)))
+    quota = wire.blob(2, wire.uint(1, 10003) + wire.uint(2, 100) + wire.uint(3, 100))
+    service.client = SimpleNamespace(
+        closed=False,
+        fault=None,
+        server_now=time.time,
+        rpc=AsyncMock(side_effect=[quota, payload]),
+    )
+    try:
+        await service.refresh_friend_hints(360)
+        assert service.friends[0]["name"] == "原名称"
+        assert service.friends[0]["stealable_plots"] == 4
+        assert service.limits[10003] == {"used": 100, "maximum": 100}
+        assert [call.args[1] for call in service.client.rpc.await_args_list] == [
+            "AllLands", "GetGameFriends"
+        ]
+    finally:
+        service.audit.close()
+
+
+async def test_friend_maturity_appointment_updates_after_new_visit(tmp_path):
+    service = FarmService(tmp_path)
+    friend_id = 12345
+    current = time.time()
+
+    def visit(mature_at):
+        return wire.blob(1, wire.uint(1, friend_id)) + wire.blob(
+            2, land_payload(mature_at=mature_at, stealable=True, left_fruit=1)
+        )
+
+    service.client = SimpleNamespace(
+        closed=False,
+        fault=None,
+        server_now=lambda: current,
+        rpc=AsyncMock(side_effect=[visit(int(current + 80)), visit(int(current + 40))]),
+    )
+    policy = Policy(friend_steal=True, steal_priority=[friend_id], friend_interval=360)
+    try:
+        await service.read_friend_lands(friend_id)
+        first = service.next_friend_due(policy)
+        assert current + 82 <= first <= current + 86
+        await service.read_friend_lands(friend_id)
+        second = service.next_friend_due(policy)
+        assert current + 42 <= second <= current + 46
+        assert second < first
+    finally:
+        service.audit.close()
+
+
+async def test_stale_stealable_plot_is_skipped_after_random_wait(tmp_path):
+    service = FarmService(tmp_path)
+    friend_id = 12345
+    service.friends = [{"id": friend_id}]
+    entries = 0
+
+    async def rpc(_service, method, body=b""):
+        nonlocal entries
+        if method == "Enter":
+            entries += 1
+            return wire.blob(1, wire.uint(1, friend_id)) + wire.blob(
+                2,
+                land_payload(
+                    mature_at=900,
+                    stealable=True,
+                    left_fruit=1 if entries == 1 else 0,
+                ),
+            )
+        assert method == "Leave"
+        return b""
+
+    service.client = SimpleNamespace(
+        gid=7,
+        closed=False,
+        fault=None,
+        server_now=lambda: 1000,
+        settings=Settings("test", random_action_delays=True),
+        pace_write=AsyncMock(),
+        rpc=AsyncMock(side_effect=rpc),
+    )
+    try:
+        await service.friend_locked("steal", friend_id)
+        methods = [call.args[1] for call in service.client.rpc.await_args_list]
+        assert methods == ["Enter", "Leave", "Enter", "Leave"]
+        service.client.pace_write.assert_awaited_once_with("Harvest")
+        assert service.metrics["friend_actions"] == 0
+        assert service.audit.db.execute("SELECT COUNT(*) FROM friend_effects").fetchone()[0] == 1
+    finally:
+        service.audit.close()
+
+
+async def test_game_reported_stolen_crop_is_not_retried_for_same_growth(tmp_path):
+    service = FarmService(tmp_path)
+    friend_id = 12345
+    service.friends = [{"id": friend_id}]
+
+    async def rpc(_service, method, body=b""):
+        if method == "Enter":
+            return wire.blob(1, wire.uint(1, friend_id)) + wire.blob(
+                2, land_payload(mature_at=900, stealable=True, left_fruit=1)
+            )
+        if method == "Harvest":
+            raise RPCError("Harvest", 1001040, "果实被人摘走")
+        assert method == "Leave"
+        return b""
+
+    service.client = SimpleNamespace(
+        gid=7,
+        closed=False,
+        fault=None,
+        server_now=lambda: 1000,
+        rpc=AsyncMock(side_effect=rpc),
+    )
+    try:
+        await service.friend_locked("steal", friend_id)
+        await service.friend_locked("steal", friend_id)
+        methods = [call.args[1] for call in service.client.rpc.await_args_list]
+        assert methods.count("Harvest") == 1
+        assert service.metrics["friend_actions"] == 0
+        assert service.audit.db.execute("SELECT COUNT(*) FROM friend_effects").fetchone()[0] == 1
+    finally:
+        service.audit.close()
+
+
+def test_daily_quotas_stop_both_local_full_and_game_rejected_actions(tmp_path):
+    service = FarmService(tmp_path)
+    now = time.time()
+    service.client = SimpleNamespace(server_now=lambda: now)
+    service.limits[10003] = {"used": 100, "maximum": 100}
+    service.limits[10004] = {"used": 58, "maximum": 100}
+    service.friend_stats.block(service.audit.account, "insects", "今日上限", day=day_key(now))
+    try:
+        quotas = service.friend_quotas(now)
+        assert quotas["weeds"]["remaining"] == 0
+        assert quotas["insects"]["remaining"] == 0
+        assert quotas["insects"]["game_limit_reached"]
+        assert service.limited_ids(10003, [1]) == []
+        assert service.limited_ids(10004, [1]) == []
     finally:
         service.audit.close()

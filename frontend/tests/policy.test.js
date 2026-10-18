@@ -7,6 +7,7 @@ import {
   mergePolicy,
   policyPatch,
   sellQuantity,
+  validatePolicy,
 } from "../src/lib/policy.js";
 import { duration, maturity } from "../src/lib/format.js";
 import { todayLeaderboard } from "../src/lib/friends.js";
@@ -71,4 +72,22 @@ test("daily leaderboard excludes inactive friends and sums affected plots instea
   );
   assert.equal(rows[0].total, 8);
   assert.deepEqual(rows[1].counts, { help: 5, steal: 2, insects: 0, weeds: 0 });
+});
+
+test("friend wait bounds are validated independently from farm write delays", () => {
+  const policy = {
+    purchase_budget: 100,
+    max_lands: 24,
+    maturity_grace_seconds: 60,
+    reward_check_interval: 14400,
+    friend_interval: 360,
+    friends_per_cycle: 3,
+    action_delay_min: 1,
+    action_delay_max: 3,
+    friend_action_delay_min: 3,
+    friend_action_delay_max: 15,
+  };
+  assert.doesNotThrow(() => validatePolicy(policy));
+  assert.throws(() => validatePolicy({ ...policy, friend_action_delay_min: 20 }));
+  assert.throws(() => validatePolicy({ ...policy, friend_action_delay_max: 31 }));
 });

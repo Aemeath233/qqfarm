@@ -39,10 +39,10 @@ class Settings:
         if (
             not math.isfinite(self.action_delay_min)
             or not math.isfinite(self.action_delay_max)
-            or not 1 <= self.action_delay_min <= self.action_delay_max <= 10
+            or not 1 <= self.action_delay_min <= self.action_delay_max <= 30
             or not 0 <= self.maturity_grace_seconds <= 3600
         ):
-            raise FarmError("操作间隔应为 1～10 秒且下限不超过上限；成熟缓冲应为 0～3600 秒。")
+            raise FarmError("操作间隔应为 1～30 秒且下限不超过上限；成熟缓冲应为 0～3600 秒。")
 
     @classmethod
     def load(cls, *, require_login=True):

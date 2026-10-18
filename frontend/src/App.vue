@@ -463,101 +463,40 @@ const {
               ><input v-model="showLocked" type="checkbox" />显示未解锁</label
             ><span class="muted">{{ visiblePlants.length }} 种</span>
           </div>
-          <div class="table-scroll">
-            <table class="plant-table">
-              <thead>
-                <tr>
-                  <th>植物</th>
-                  <th>来源 / 布局</th>
-                  <th>金币 / 包</th>
-                  <th>种子库存</th>
-                  <th>解锁条件</th>
-                  <th>基础成熟时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="plant in visiblePlants"
-                  :key="plant.seed_id + ':' + plant.goods_id"
-                  :class="{
-                    selected: draft.seed_priority.includes(plant.seed_id),
-                  }"
-                >
-                  <td>
-                    <b>{{ plant.name }}</b
-                    ><small v-if="draft.seed_priority.includes(plant.seed_id)"
-                      >优先级
-                      {{
-                        draft.seed_priority.indexOf(plant.seed_id) + 1
-                      }}</small
-                    >
-                  </td>
-                  <td>
-                    {{ plant.inventory_only ? "库存种子" : "商店"
-                    }}<small>{{
-                      plant.layout_inferred
-                        ? "布局待核实"
-                        : plant.plot_size === 2
-                          ? "占用四格"
-                          : "单格"
-                    }}</small>
-                  </td>
-                  <td>
-                    {{
-                      plant.inventory_only
-                        ? "仅使用库存"
-                        : plant.price > 0
-                          ? num(plant.price)
-                          : "未提供"
-                    }}<small
-                      v-if="!plant.inventory_only && plant.pack_count > 1"
-                      >每包 {{ plant.pack_count }} 粒</small
-                    >
-                  </td>
-                  <td>{{ num(plant.inventory) }}</td>
-                  <td>
-                    {{
-                      plant.inventory_only
-                        ? plant.inventory > 0
-                          ? "可使用"
-                          : "无库存"
-                        : "Lv. " + plant.required_level
-                    }}<small v-if="!plant.inventory_only">{{
-                      plant.unlocked ? "已解锁" : "未解锁"
-                    }}</small>
-                  </td>
-                  <td>
-                    {{
-                      plant.base_grow_seconds
-                        ? duration(plant.base_grow_seconds)
-                        : "未提供"
-                    }}
-                  </td>
-                  <td>
-                    <button
-                      :disabled="
-                        busy ||
-                        (!plant.unlocked &&
-                          !draft.seed_priority.includes(plant.seed_id))
-                      "
-                      :class="{
-                        selected: draft.seed_priority.includes(plant.seed_id),
-                      }"
-                      @click="toggleSeed(plant.seed_id)"
-                    >
-                      {{
-                        draft.seed_priority.includes(plant.seed_id)
-                          ? "移除"
-                          : !plant.unlocked
-                            ? "未解锁"
-                            : "加入优先级"
-                      }}
-                    </button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="plant-grid">
+            <button
+              v-for="plant in visiblePlants"
+              :key="plant.seed_id + ':' + plant.goods_id"
+              class="plant-tile"
+              :class="{ selected: draft.seed_priority.includes(plant.seed_id) }"
+              :disabled="
+                busy ||
+                (!plant.unlocked && !draft.seed_priority.includes(plant.seed_id))
+              "
+              :aria-pressed="draft.seed_priority.includes(plant.seed_id)"
+              @click="toggleSeed(plant.seed_id)"
+            >
+              <span class="plant-tile-head">
+                <b>{{ plant.name }}</b>
+                <em v-if="draft.seed_priority.includes(plant.seed_id)">
+                  第 {{ draft.seed_priority.indexOf(plant.seed_id) + 1 }} 位
+                </em>
+              </span>
+              <span class="plant-tile-meta">
+                {{ plant.inventory_only ? "库存种子" : `Lv. ${plant.required_level}` }}
+                · {{ plant.base_grow_seconds ? duration(plant.base_grow_seconds) : "成熟时间未知" }}
+              </span>
+              <span class="plant-tile-meta">
+                {{ plant.inventory_only ? "仅用库存" : plant.price > 0 ? `${num(plant.price)} 金币/包` : "价格未知" }}
+                · 库存 {{ num(plant.inventory) }}
+              </span>
+              <span v-if="plant.layout_inferred || plant.plot_size === 2" class="plant-tile-meta">
+                {{ plant.layout_inferred ? "占地待核实" : "占用四格" }}
+              </span>
+              <span class="plant-tile-action">
+                {{ draft.seed_priority.includes(plant.seed_id) ? "已加入 · 点击移除" : plant.unlocked ? "点击加入优先级" : "未解锁" }}
+              </span>
+            </button>
           </div>
           <p v-if="!visiblePlants.length" class="empty">
             {{
@@ -619,7 +558,12 @@ const {
           <div class="panel-heading">
             <div>
               <h2>互动设置</h2>
-              <p>各类操作有独立开关与好友名单，保存后生效。</p>
+              <p>
+                各类操作有独立开关与好友名单，保存后生效。
+                <span v-if="data.running && data.next_friend_check">
+                  下次好友检查：{{ new Date(data.next_friend_check * 1000).toLocaleTimeString("zh-CN", { hour12: false }) }}
+                </span>
+              </p>
             </div>
             <button class="primary" :disabled="busy || !changed" @click="save">
               保存好友设置
@@ -633,11 +577,7 @@ const {
                   v-model="draft['friend_' + kind]"
                   type="checkbox" /></label
               ><small>{{ description }}</small>
-              <div v-if="data.friend_daily_limits?.[kind]" class="friend-block">
-                <b>今日已达游戏上限</b>
-                <p>{{ data.friend_daily_limits[kind] }}</p>
-              </div>
-              <div v-else-if="data.friend_blocks?.[kind]" class="friend-block">
+              <div v-if="data.friend_blocks?.[kind]" class="friend-block">
                 <b>已暂停</b>
                 <p>{{ data.friend_blocks[kind] }}</p>
                 <button
@@ -653,14 +593,24 @@ const {
                 </button>
               </div>
               <p v-else-if="data.friend_notes?.[kind]" class="quota">{{ data.friend_notes[kind] }}</p>
-              <p v-if="data.friend_quota?.[kind]" class="quota">
-                <template v-if="data.friend_quota[kind].game_limit_reached">
-                  本助手今日记录 {{ data.friend_quota[kind].used }} 次；游戏已限制继续操作
-                </template>
-                <template v-else>
-                  今日已用 {{ data.friend_quota[kind].used }} / {{ data.friend_quota[kind].maximum }}
-                </template>
-              </p>
+              <div
+                v-if="data.friend_quota?.[kind]"
+                class="quota-status"
+                :class="{ finished: data.friend_quota[kind].remaining === 0 }"
+              >
+                <b>{{
+                  data.friend_quota[kind].remaining === 0
+                    ? "今日已停止"
+                    : `接口预计还可操作 ${data.friend_quota[kind].remaining} 次`
+                }}</b>
+                <span>
+                  已用 {{ data.friend_quota[kind].used }} /
+                  {{ data.friend_quota[kind].maximum }}
+                  <template v-if="data.friend_quota[kind].game_limit_reached">
+                    · 游戏已限制继续，次日自动恢复
+                  </template>
+                </span>
+              </div>
               <div class="selected-friends">
                 <div v-for="(id, i) in draft[kind + '_priority']" :key="id">
                   <span>{{ i + 1 }}. {{ friendName(id) }}</span
@@ -699,7 +649,7 @@ const {
                 <option value="all">名单优先，再检查其他好友</option>
               </select></label
             ><label
-              >巡查间隔（秒）<input
+              >常规巡查间隔（秒）<input
                 v-model.number="draft.friend_interval"
                 type="number"
                 min="60"
@@ -711,6 +661,23 @@ const {
                 min="1"
                 max="10"
             /></label>
+            <label
+              >采摘/帮助等待下限（秒）<input
+                v-model.number="draft.friend_action_delay_min"
+                type="number"
+                min="1"
+                max="30"
+                step="1" /></label>
+            <label
+              >采摘/帮助等待上限（秒）<input
+                v-model.number="draft.friend_action_delay_max"
+                type="number"
+                min="1"
+                max="30"
+                step="1" /></label>
+            <p class="friend-timing-note">
+              常规巡查更新预计成熟时间；到时优先复查。发现可操作地块后随机等待，再读一次好友农场才提交操作。名单超过每轮数量时会轮换检查。
+            </p>
           </div>
         </section>
         <section class="panel">
