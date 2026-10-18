@@ -36,8 +36,10 @@ def main():
         for name in (
             "pyproject.toml",
             "uv.lock",
+            "LICENSE",
             "README.md",
             "THIRD_PARTY.md",
+            "licenses/plant-catalog-MIT.txt",
             "licenses/tsdk-wasm-MIT.txt",
             ".env.example",
             "docs/网页部署说明.md",

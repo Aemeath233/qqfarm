@@ -8,4 +8,6 @@ The server distribution includes a fixed protocol WASM module from [chuankkk/qq-
 
 The required license notice is in [`licenses/tsdk-wasm-MIT.txt`](licenses/tsdk-wasm-MIT.txt). The server verifies the hash before using the module.
 
+The plant and item reference catalog in `src/qqfarm/resources/plant_catalog.json` is derived from [linguo2625469/qq-farm-bot](https://github.com/linguo2625469/qq-farm-bot) (source commit recorded in the JSON). The upstream project uses the MIT License; its copyright and license notice are retained in [`licenses/plant-catalog-MIT.txt`](licenses/plant-catalog-MIT.txt).
+
 Fiddler is installed and used separately by the user to capture a SAZ file. The server package does not include Fiddler, QQ, or user authorization data.
