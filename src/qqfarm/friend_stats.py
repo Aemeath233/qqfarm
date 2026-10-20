@@ -41,12 +41,29 @@ class FriendStats:
         self.migrate_known_blocks()
 
     def migrate_known_blocks(self):
-        """Convert only the now-verified ordinary errors from older releases."""
+        """Clear old blocks whose ambiguous batch replies now have safe skip handling."""
         rows = self.db.execute("SELECT account,kind,day,reason FROM friend_blocks").fetchall()
         with self.db:
             for account, kind, day, reason in rows:
                 codes = set(int(v) for v in re.findall(r"\b100\d{4}\b", reason))
                 if KNOWN_SKIP_CODES.get(kind) in codes:
+                    self.db.execute(
+                        "DELETE FROM friend_blocks WHERE account=? AND kind=? AND day=?",
+                        (account, kind, day),
+                    )
+                elif day == "*" and (
+                    (kind == "help" and reason.startswith("照料回包未完整确认"))
+                    or (
+                        kind == "insects"
+                        and reason.startswith("好友放虫")
+                        and ("未能确认全部目标" in reason or "结果无法复查" in reason)
+                    )
+                    or (
+                        kind == "weeds"
+                        and reason.startswith("好友放草")
+                        and ("未能确认全部目标" in reason or "结果无法复查" in reason)
+                    )
+                ):
                     self.db.execute(
                         "DELETE FROM friend_blocks WHERE account=? AND kind=? AND day=?",
                         (account, kind, day),

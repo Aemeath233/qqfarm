@@ -62,6 +62,17 @@ def friend_body(method, friend_id, ids):
     )
 
 
+def friend_effect_identity(account_id, friend_id, plot, method):
+    identity = (
+        f"{account_id}:{friend_id}:{plot.id}:{plot.plant_id}:"
+        f"{plot.mature_at}:{method}"
+    )
+    if method == "Farming":
+        # A new dry/weed/insect state on the same crop is a new opportunity.
+        identity += f":{plot.dry_num}:{plot.weed_owners}:{plot.insect_owners}"
+    return identity
+
+
 class FarmService:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -992,7 +1003,14 @@ class FarmService:
             self.friend_maturities.pop(friend_id, None)
         return rows
 
-    async def confirm_care(self, rows, payload, ids, *, friend_id=None):
+    def remember_friend_attempts(self, identities):
+        with self.audit.db:
+            self.audit.db.executemany(
+                "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
+                ((identity, time.time()) for identity in identities),
+            )
+
+    async def confirm_care(self, rows, payload, ids, *, friend_id=None, identities=None):
         try:
             self.update_farming(rows, payload, ids)
             return True
@@ -1007,7 +1025,22 @@ class FarmService:
                 friend=tag(friend_id) if friend_id is not None else None,
             )
         if friend_id is not None:
-            latest = await self.read_friend_lands(friend_id, revisit=True)
+            try:
+                latest = await self.read_friend_lands(friend_id, revisit=True)
+            except (RPCError, wire.ProtocolError) as exc:
+                client = self.require_client()
+                if client.fault or client.disconnected.is_set():
+                    raise UncertainOutcome(
+                        "好友照料回包不完整且连接失效；已停止，不重复操作。"
+                    ) from exc
+                self.remember_friend_attempts(identities.values())
+                self.audit.record(
+                    "care_verification", "unconfirmed",
+                    plots=ids, verification_error=type(exc).__name__,
+                    reason="复查暂时失败；本批已尝试，不重复提交，继续巡查。",
+                )
+                self.friend_notes["help"] = "好友照料结果暂未确认；已跳过本批并继续巡查。"
+                return False
         else:
             latest_payload = await self.require_client().rpc(PLANT, "AllLands")
             latest = {p.id: p for p in models.lands(latest_payload)}
@@ -1022,12 +1055,23 @@ class FarmService:
             or latest[key].insect_owners
         ]
         if unresolved:
+            if friend_id is not None:
+                self.remember_friend_attempts(identities.values())
+                self.audit.record(
+                    "care_verification", "unconfirmed",
+                    plots=ids, unresolved_plots=unresolved,
+                    reason="部分目标仍需照料；本批已尝试，不重复提交，继续巡查。",
+                )
+                self.friend_notes["help"] = (
+                    f"本批 {len(unresolved)} 块地未确认照料结果；已跳过并继续巡查。"
+                )
+                return False
             reason = "照料回包未完整确认，复查后仍无法核实全部目标；已暂停，不重复提交。"
             self.audit.record("care_verification", "unknown", plots=unresolved)
-            if friend_id is not None:
-                self.friend_stats.block(self.audit.account, "help", reason)
-                raise FriendInteractionPaused(reason)
             raise UncertainOutcome(reason)
+        if friend_id is not None:
+            self.remember_friend_attempts(identities.values())
+            self.friend_notes["help"] = "复查显示本批已无需照料；不重复提交，继续巡查。"
         self.audit.record(
             "care_verification",
             "received",
@@ -1255,16 +1299,10 @@ class FarmService:
                             eligible = state == "growing" and not (
                                 plot.insect_owners if kind == "insects" else plot.weed_owners
                             )
-                        identity = (
-                            f"{c.gid}:{friend_id}:{plot.id}:{plot.plant_id}:"
-                            f"{plot.mature_at}:{method}"
-                        )
-                        if eligible and (
-                            kind == "help"
-                            or not self.audit.db.execute(
-                                "SELECT 1 FROM friend_effects WHERE identity=?", (identity,)
-                            ).fetchone()
-                        ):
+                        identity = friend_effect_identity(c.gid, friend_id, plot, method)
+                        if eligible and not self.audit.db.execute(
+                            "SELECT 1 FROM friend_effects WHERE identity=?", (identity,)
+                        ).fetchone():
                             selected.append(plot.id)
                     if method == "Farming":
                         allowed = set(self.care_ids(lands, c.server_now()))
@@ -1295,9 +1333,8 @@ class FarmService:
                         if kind == "steal":
                             for key in skipped:
                                 plot = previous[key]
-                                identity = (
-                                    f"{c.gid}:{friend_id}:{key}:{plot.plant_id}:"
-                                    f"{plot.mature_at}:{method}"
+                                identity = friend_effect_identity(
+                                    c.gid, friend_id, plot, method
                                 )
                                 self.audit.db.execute(
                                     "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
@@ -1309,8 +1346,7 @@ class FarmService:
                     if not ids:
                         continue
                 identities = {
-                    key: f"{c.gid}:{friend_id}:{key}:{rows[key].plant_id}:"
-                    f"{rows[key].mature_at}:{method}"
+                    key: friend_effect_identity(c.gid, friend_id, rows[key], method)
                     for key in ids
                 }
                 care_counts = (
@@ -1360,13 +1396,7 @@ class FarmService:
                             plots=ids,
                             reason=reason,
                         )
-                        if kind == "steal":
-                            for identity in identities.values():
-                                self.audit.db.execute(
-                                    "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
-                                    (identity, time.time()),
-                                )
-                            self.audit.db.commit()
+                        self.remember_friend_attempts(identities.values())
                         rows = await self.read_friend_lands(friend_id, revisit=True)
                         continue
                     if kind not in {"help", "steal"} or exc.method != method:
@@ -1413,9 +1443,12 @@ class FarmService:
                         changed_plots=changed,
                         reason="拒绝后复查发现目标状态已变化，本次跳过，未重发；错误码含义未确定。",
                     )
+                    self.remember_friend_attempts(identities.values())
                     continue
                 if method == "Farming":
-                    confirmed = await self.confirm_care(rows, response, ids, friend_id=friend_id)
+                    confirmed = await self.confirm_care(
+                        rows, response, ids, friend_id=friend_id, identities=identities
+                    )
                     self.merge_limits(catalog.limits(response))
                     if not confirmed:
                         continue
@@ -1433,22 +1466,14 @@ class FarmService:
                         )
                         try:
                             latest = await self.read_friend_lands(friend_id, revisit=True)
-                        except Exception as verify_error:
+                        except (RPCError, wire.ProtocolError) as verify_error:
                             if getattr(c, "fault", None) or getattr(
                                 getattr(c, "disconnected", None), "is_set", lambda: False
                             )():
                                 raise UncertainOutcome(
                                     f"{method} 回包缺少地块且连接失效；已停止，不会重复操作。"
                                 ) from verify_error
-                            reason = (
-                                "好友放虫结果无法复查；已暂停放虫，其他挂机继续。请在游戏核对后恢复。"
-                                if kind == "insects"
-                                else (
-                                    "好友放草结果无法复查；已暂停放草，其他挂机继续。"
-                                    "请在游戏核对后恢复。"
-                                )
-                            )
-                            self.friend_stats.block(self.audit.account, kind, reason)
+                            self.remember_friend_attempts(identities.values())
                             self.audit.record(
                                 "interaction_verification",
                                 "unconfirmed",
@@ -1456,23 +1481,17 @@ class FarmService:
                                 target_count=len(ids),
                                 reply_bytes=len(response),
                                 verification_error=type(verify_error).__name__,
+                                reason="复查暂时失败；本批已尝试，不重复提交，继续巡查。",
                             )
-                            raise FriendInteractionPaused(reason) from verify_error
+                            self.friend_notes[kind] = "复查暂时失败；已跳过本批并继续巡查。"
+                            continue
                         owners = "insect_owners" if kind == "insects" else "weed_owners"
                         owned = [
                             key for key in ids
                             if key in latest and c.gid in getattr(latest[key], owners)
                         ]
                         if len(owned) != len(ids):
-                            reason = (
-                                "好友放虫未能确认全部目标；已暂停放虫，其他挂机继续。请在游戏核对后恢复。"
-                                if kind == "insects"
-                                else (
-                                    "好友放草未能确认全部目标；已暂停放草，其他挂机继续。"
-                                    "请在游戏核对后恢复。"
-                                )
-                            )
-                            self.friend_stats.block(self.audit.account, kind, reason)
+                            self.remember_friend_attempts(identities.values())
                             self.audit.record(
                                 "interaction_verification",
                                 "unconfirmed",
@@ -1485,20 +1504,22 @@ class FarmService:
                                     for key in ids if key in latest
                                 ),
                                 reply_bytes=len(response),
+                                reason="只计入已确认的地块；其余本批已尝试，不重复提交。",
                             )
-                            raise FriendInteractionPaused(reason) from exc
+                            self.friend_notes[kind] = (
+                                f"本批确认 {len(owned)}/{len(ids)} 块地；其余已跳过，继续巡查。"
+                            )
+                            if not owned:
+                                self.merge_limits(catalog.limits(response, 2))
+                                continue
+                            ids = owned
                         rows.update(latest)
-                        self.audit.record(
-                            "interaction_verification", "confirmed", method=method, plots=ids
-                        )
+                        if len(owned) == len(identities):
+                            self.audit.record(
+                                "interaction_verification", "confirmed", method=method, plots=ids
+                            )
                 self.merge_limits(catalog.limits(response, 4 if method == "Harvest" else 2))
-                for plot in ids:
-                    plot = rows[plot]
-                    self.audit.db.execute(
-                        "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
-                        (identities[plot.id], time.time()),
-                    )
-                self.audit.db.commit()
+                self.remember_friend_attempts(identities.values())
                 self.audit.record(
                     "friend_" + kind,
                     "confirmed",
@@ -1507,7 +1528,8 @@ class FarmService:
                     plots=ids,
                     care_counts=care_counts,
                 )
-                self.friend_notes.pop(kind, None)
+                if len(ids) == len(identities):
+                    self.friend_notes.pop(kind, None)
             for friend in self.friends:
                 if friend["id"] == friend_id:
                     friend["stealable_plots"] = sum(
