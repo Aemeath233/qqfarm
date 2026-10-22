@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from qqfarm import models, wire
+from qqfarm.client import UncertainOutcome
 from qqfarm.config import FarmError, Settings
 from qqfarm.engine import FarmEngine
 
@@ -119,10 +120,14 @@ async def test_purchase_is_capped_by_budget_and_actual_seed_reply():
 
 
 async def test_missing_target_reply_stops_without_cleanup():
-    client = Client([("AllLands", plot(9, [(6, 99)])), ("Harvest", plot(13))])
-    with pytest.raises(FarmError, match="土地记录不完整"):
+    client = Client([
+        ("AllLands", plot(9, [(6, 99)])),
+        ("Harvest", plot(13)),
+        ("AllLands", plot(9, [(6, 99)])),
+    ])
+    with pytest.raises(UncertainOutcome, match="未能确认"):
         await FarmEngine(Settings("test"), client, Log(), apply=True).round()
-    assert [method for method, _ in client.calls] == ["AllLands", "Harvest"]
+    assert [method for method, _ in client.calls] == ["AllLands", "Harvest", "AllLands"]
 
 
 async def test_24_mature_lands_are_harvested_and_cleared_in_two_requests():
