@@ -604,8 +604,9 @@ const {
                     : `接口预计还可操作 ${data.friend_quota[kind].remaining} 次`
                 }}</b>
                 <span>
-                  已用 {{ data.friend_quota[kind].used }} /
-                  {{ data.friend_quota[kind].maximum }}
+                  本助手确认 {{ data.friend_quota[kind].confirmed }} 块 · 放草/放虫共用额度
+                  {{ data.friend_quota[kind].shared_used }} /
+                  {{ data.friend_quota[kind].shared_maximum }}
                   <template v-if="data.friend_quota[kind].game_limit_reached">
                     · 游戏已限制继续，次日自动恢复
                   </template>

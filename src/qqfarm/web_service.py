@@ -1236,17 +1236,31 @@ class FarmService:
         self.roll_limits(now)
         totals = self.friend_stats.snapshot(self.audit.account, now)["totals"]
         daily_blocks = self.friend_stats.daily_blocks(self.audit.account, now)
+        # Game counter 10003 tracks the shared PutWeeds + PutInsects budget.
+        # Counter 10004 tracks the insect subset. Confirmed daily records also
+        # contribute when a reply omits or lags behind the current counter.
+        shared = self.limits.get(10003, {})
+        insect = self.limits.get(10004, {})
+        shared_maximum = min(100, shared.get("maximum") or 100)
+        insect_maximum = min(100, insect.get("maximum") or 100)
+        confirmed = {kind: totals[kind]["plots"] for kind in ("insects", "weeds")}
+        shared_used = max(sum(confirmed.values()), shared.get("used", 0))
+        insect_used = max(confirmed["insects"], insect.get("used", 0))
+        shared_remaining = max(0, shared_maximum - shared_used)
         result = {}
         for kind in ("insects", "weeds"):
-            server = self.limits.get(FRIEND_METHODS[kind][1], {})
-            maximum = min(100, server.get("maximum") or 100)
-            used = max(totals[kind]["plots"], server.get("used", 0))
+            remaining = shared_remaining
+            if kind == "insects":
+                remaining = min(remaining, max(0, insect_maximum - insect_used))
             result[kind] = {
-                "used": used,
-                "maximum": maximum,
-                "remaining": 0 if kind in daily_blocks else max(0, maximum - used),
+                "used": insect_used if kind == "insects" else confirmed["weeds"],
+                "maximum": insect_maximum if kind == "insects" else shared_maximum,
+                "confirmed": confirmed[kind],
+                "shared_used": shared_used,
+                "shared_maximum": shared_maximum,
+                "remaining": 0 if kind in daily_blocks else remaining,
                 "game_limit_reached": kind in daily_blocks,
-                "source": "游戏回包与本助手记录" if server else "本助手保守上限",
+                "source": "游戏回包与本助手记录" if shared else "本助手保守上限",
             }
         return result
 
@@ -1362,10 +1376,20 @@ class FarmService:
                     response = await c.rpc(PLANT, method, friend_body(method, friend_id, ids))
                 except RPCError as exc:
                     if exc.method == ACTION_METHODS[kind] and exc.code == DAILY_LIMIT_CODE:
-                        reason = "游戏判定今日次数已达上限；次日自动恢复。"
-                        self.friend_stats.block(
-                            self.audit.account, kind, reason, day=day_key(c.server_now())
-                        )
+                        if kind in {"insects", "weeds"}:
+                            reason = "游戏判定放草与放虫的共用次数已达上限；次日自动恢复。"
+                            for shared_kind in ("insects", "weeds"):
+                                self.friend_stats.block(
+                                    self.audit.account,
+                                    shared_kind,
+                                    reason,
+                                    day=day_key(c.server_now()),
+                                )
+                        else:
+                            reason = "游戏判定今日次数已达上限；次日自动恢复。"
+                            self.friend_stats.block(
+                                self.audit.account, kind, reason, day=day_key(c.server_now())
+                            )
                         self.audit.record(
                             "friend_" + kind,
                             "skipped",

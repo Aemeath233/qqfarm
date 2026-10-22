@@ -1,7 +1,7 @@
 {
   "name": "qqfarm-personal-panel",
   "private": true,
-  "version": "0.6.11",
+  "version": "0.6.12",
   "license": "MIT",
   "type": "module",
   "scripts": {
