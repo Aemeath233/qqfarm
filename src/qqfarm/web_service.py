@@ -46,6 +46,20 @@ class FriendInteractionPaused(FarmError):
     """Only the affected friend action needs attention; own farming can continue."""
 
 
+class FriendReadUnavailable(FarmError):
+    """A read-only friend visit failed before any interaction was sent."""
+
+
+class ConnectionProbeAudit:
+    """Keep a candidate login separate from the active account's audit stream."""
+
+    def __init__(self):
+        self.account = ""
+
+    def record(self, _operation, _state, **_details):
+        pass
+
+
 def friend_rejection(exc):
     return f"{exc} 原因未确认，此类互动已暂停；确认后可手动恢复。"
 
@@ -82,6 +96,17 @@ class FarmService:
         self.audit.db.execute(
             "CREATE TABLE IF NOT EXISTS friend_effects (identity TEXT PRIMARY KEY, at REAL)"
         )
+        self.audit.db.execute(
+            "CREATE INDEX IF NOT EXISTS friend_effects_at ON friend_effects(at)"
+        )
+        self.audit.db.execute(
+            "CREATE TABLE IF NOT EXISTS manual_receipts ("
+            "key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, at REAL NOT NULL, "
+            "state TEXT NOT NULL)"
+        )
+        self.audit.db.execute(
+            "CREATE INDEX IF NOT EXISTS manual_receipts_at ON manual_receipts(at)"
+        )
         self.audit.db.commit()
         self.friend_stats = FriendStats(self.audit.db)
         self.audit.on_record = self.record
@@ -96,6 +121,7 @@ class FarmService:
             key.chmod(0o600)
         self.cipher = Fernet(key.read_bytes())
         self.guard = asyncio.Lock()
+        self.login_guard = asyncio.Lock()
         self.stop = asyncio.Event()
         self.policy_changed = asyncio.Event()
         self.reward_changed = asyncio.Event()
@@ -110,6 +136,7 @@ class FarmService:
         self.friend_notes = {}
         self.friend_maturities = {}
         self.friend_cursor = {}
+        self.last_effect_prune = 0.0
         self.friend_summary_at = 0
         self.task_note = ""
         self.note = "尚未连接，请导入本账号农场授权"
@@ -341,60 +368,88 @@ class FarmService:
         return time.time() + max(15, engine.next_delay(latest))
 
     async def login(self, profile):
-        await self.pause()
-        async with self.guard:
-            await self.disconnect()
-            self.reset_farm_state()
-            if self.seed_layouts_version != profile["version"]:
-                self.seed_layouts.clear()
-                self.seed_layouts_version = profile["version"]
-            self.mode, self.note = "connecting", "正在登录农场"
+        async with self.login_guard:
+            settings = Settings(
+                profile["code"],
+                client_version=profile["version"],
+                login_method=profile.get("login_method", "Login"),
+                os_tag=profile.get("os", "Windows"),
+                data_dir=self.root,
+                wasm_path=self.root / "tsdk.wasm",
+                request_interval=1,
+                user_agent=profile.get("user_agent", "qqfarm-personal-web/1"),
+                origin=profile.get("origin", "https://gate-obt.nqf.qq.com"),
+                login_template=base64.b64decode(profile["template"], validate=True)
+                if profile.get("template")
+                else None,
+            )
+            candidate_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15), trust_env=False
+            )
+            candidate = None
+            transferred = False
             try:
-                self.lock = InstanceLock(self.root / "account.lock")
-                self.lock.__enter__()
-                self.session = aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=15), trust_env=False
-                )
-                settings = Settings(
-                    profile["code"],
-                    client_version=profile["version"],
-                    login_method=profile.get("login_method", "Login"),
-                    os_tag=profile.get("os", "Windows"),
-                    data_dir=self.root,
-                    wasm_path=self.root / "tsdk.wasm",
-                    request_interval=1,
-                    user_agent=profile.get("user_agent", "qqfarm-personal-web/1"),
-                    origin=profile.get("origin", "https://gate-obt.nqf.qq.com"),
-                    login_template=base64.b64decode(profile["template"], validate=True)
-                    if profile.get("template")
-                    else None,
-                )
-                self.client = GameClient(settings, self.session, self.audit)
-                await self.client.connect()
-                self.profile = {"friend_open_ids": profile.get("friend_open_ids", [])}
-                self.friends = []
-                self.client.settings = replace(settings, login_code="", login_template=None)
-                self.player = {
-                    "name": self.client.player_name,
-                    "level": self.client.player_level,
-                    "gold": self.client.gold,
-                    "fingerprint": self.audit.account,
-                }
-                await self.refresh_locked()
-                await self.client.wait(30)
-                if not self.client.heartbeat_stats.ack_count:
+                probe_audit = ConnectionProbeAudit()
+                candidate = GameClient(settings, candidate_session, probe_audit)
+                await candidate.connect()
+                candidate.settings = replace(settings, login_code="", login_template=None)
+                land_payload = await candidate.rpc(PLANT, "AllLands")
+                lands = models.lands(land_payload)
+                if len({land.id for land in lands}) != len(lands):
+                    raise FarmError("候选授权返回重复土地，已保留原有农场连接。")
+                await candidate.wait(30)
+                if (
+                    not candidate.heartbeat_stats.ack_count
+                    or candidate.fault
+                    or candidate.disconnected.is_set()
+                ):
                     raise FarmError("未确认心跳，尚未启用自动操作。")
-                self.mode, self.note = "connected", "登录和心跳正常，自动操作尚未启动"
-                # 仅加密保存本账号农场资料；启动服务时不会盲目重用失效code。
-                (self.root / "farm-session.enc").write_bytes(
-                    self.cipher.encrypt(json.dumps(profile).encode())
-                )
-                (self.root / "farm-session.enc").chmod(0o600)
-                self.observer = asyncio.create_task(self.observe())
-            except BaseException:
-                await self.disconnect()
-                self.mode, self.note = "offline", "连接失败，请重新获取本账号农场授权"
-                raise
+                was_running = self.running
+                await self.pause()
+                async with self.guard:
+                    if candidate.fault or candidate.disconnected.is_set():
+                        if was_running and self.client and not self.client.fault:
+                            await self.start()
+                        raise FarmError("候选农场连接已失效，请重新抓包；未切换旧连接。")
+                    await self.disconnect()
+                    self.reset_farm_state()
+                    if self.seed_layouts_version != profile["version"]:
+                        self.seed_layouts.clear()
+                        self.seed_layouts_version = profile["version"]
+                    self.mode, self.note = "connecting", "正在切换农场连接"
+                    try:
+                        account_lock = InstanceLock(self.root / "account.lock")
+                        account_lock.__enter__()
+                        self.lock = account_lock
+                        self.session = candidate_session
+                        self.client = candidate
+                        self.client.audit = self.audit
+                        self.audit.account = probe_audit.account
+                        transferred = True
+                        self.profile = {"friend_open_ids": profile.get("friend_open_ids", [])}
+                        self.player = {
+                            "name": candidate.player_name,
+                            "level": candidate.player_level,
+                            "gold": candidate.gold,
+                            "fingerprint": self.audit.account,
+                        }
+                        await self.refresh_locked()
+                        self.mode, self.note = "connected", "登录和心跳正常，自动操作尚未启动"
+                        # Never reuse a captured login code after a service restart.
+                        (self.root / "farm-session.enc").write_bytes(
+                            self.cipher.encrypt(json.dumps(profile).encode())
+                        )
+                        (self.root / "farm-session.enc").chmod(0o600)
+                        self.observer = asyncio.create_task(self.observe())
+                    except BaseException:
+                        await self.disconnect()
+                        self.mode, self.note = "offline", "连接失败，请重新获取本账号农场授权"
+                        raise
+            finally:
+                if not transferred:
+                    if candidate is not None:
+                        await candidate.close()
+                    await candidate_session.close()
 
     async def observe(self):
         client = self.client
@@ -977,18 +1032,38 @@ class FarmService:
         c = self.require_client()
         if revisit:
             await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
-        payload = await c.rpc(
-            VISIT,
-            "Enter",
-            wire.uint(1, friend_id) + wire.uint(2, 2) + wire.uint(3, 0) + wire.blob(7, b""),
-        )
-        fields = wire.parse(payload)
-        if wire.number(wire.parse(wire.data(fields, 1)), 1) != friend_id:
-            raise FarmError("好友农场身份与请求不匹配，未执行互动。")
-        plots = [models.land(value) for value in fields.get(2, [])]
+        try:
+            payload = await c.rpc(
+                VISIT,
+                "Enter",
+                wire.uint(1, friend_id) + wire.uint(2, 2) + wire.uint(3, 0) + wire.blob(7, b""),
+            )
+            fields = wire.parse(payload)
+            identity = wire.number(wire.parse(wire.data(fields, 1)), 1)
+            plots = [models.land(value) for value in fields.get(2, [])]
+        except RPCError as exc:
+            if revisit:
+                raise
+            raise FriendReadUnavailable(
+                f"好友农场读取被游戏拒绝（错误码 {exc.code}），本轮跳过。"
+            ) from None
+        except wire.ProtocolError as exc:
+            if revisit:
+                raise UncertainOutcome("互动后的好友农场复查格式异常，结果无法确认。") from exc
+            raise FriendReadUnavailable("好友土地回包格式异常，本轮跳过该好友。") from exc
+        except FarmError as exc:
+            if revisit or c.fault or c.disconnected.is_set():
+                raise
+            raise FriendReadUnavailable("好友农场暂时无法读取，本轮跳过该好友。") from exc
+        if identity != friend_id:
+            if revisit:
+                raise UncertainOutcome("互动后复查的好友身份不匹配，结果无法确认。")
+            raise FriendReadUnavailable("好友农场身份与请求不匹配，未执行互动。")
         rows = {plot.id: plot for plot in plots}
         if len(rows) != len(plots):
-            raise FarmError("好友土地记录重复，未执行互动。")
+            if revisit:
+                raise UncertainOutcome("互动后复查的好友土地记录重复，结果无法确认。")
+            raise FriendReadUnavailable("好友土地记录重复，未执行互动。")
         now = c.server_now()
         future = [
             plot.mature_at
@@ -1004,10 +1079,16 @@ class FarmService:
         return rows
 
     def remember_friend_attempts(self, identities):
+        now = time.time()
         with self.audit.db:
+            if now - self.last_effect_prune >= 3600:
+                self.audit.db.execute(
+                    "DELETE FROM friend_effects WHERE at<?", (now - 30 * 86400,)
+                )
+                self.last_effect_prune = now
             self.audit.db.executemany(
                 "INSERT OR REPLACE INTO friend_effects VALUES (?,?)",
-                ((identity, time.time()) for identity in identities),
+                ((identity, now) for identity in identities),
             )
 
     async def confirm_care(self, rows, payload, ids, *, friend_id=None, identities=None):
@@ -1214,6 +1295,12 @@ class FarmService:
                     self.friend_stats.block(self.audit.account, kind, friend_rejection(exc))
                     self.audit.record("friend_action", "skipped", friend=tag(gid), code=exc.code)
                     break
+                except FriendReadUnavailable as exc:
+                    self.friend_notes[kind] = str(exc)
+                    self.audit.record(
+                        "friend_visit", "skipped", friend=tag(gid), reason=str(exc)
+                    )
+                    continue
                 except FriendInteractionPaused:
                     break
                 if self.next_check and time.time() >= self.next_check:
@@ -1479,7 +1566,7 @@ class FarmService:
                 else:
                     try:
                         FarmEngine.updated_batch(rows, response, ids)
-                    except (FarmError, wire.ProtocolError) as exc:
+                    except (FarmError, wire.ProtocolError):
                         if kind not in {"insects", "weeds"}:
                             raise
                         # Some successful replies omit the affected lands. Check
@@ -1569,14 +1656,14 @@ class FarmService:
         finally:
             try:
                 await c.rpc(VISIT, "Leave", wire.uint(1, friend_id) + wire.uint(2, 0))
-            except RPCError as exc:
+            except (RPCError, FarmError, wire.ProtocolError) as exc:
                 # A refused Leave must not replace the original action/verification error.
                 self.audit.record(
                     "friend_visit_leave",
                     "rejected",
                     friend=tag(friend_id),
-                    code=exc.code,
-                    message=exc.message,
+                    code=getattr(exc, "code", None),
+                    message=str(exc),
                 )
 
     async def close(self):

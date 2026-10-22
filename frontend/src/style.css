@@ -740,6 +740,22 @@ footer {
   width: 100%;
   margin-top: 9px;
 }
+.password-field {
+  position: relative;
+}
+.password-field input {
+  padding-right: 70px;
+}
+.login-card .password-field button {
+  position: absolute;
+  right: 5px;
+  top: 13px;
+  width: auto;
+  margin: 0;
+  padding: 6px 9px;
+  border: 0;
+  background: transparent;
+}
 .login-card button {
   width: 100%;
   margin-top: 18px;
@@ -1287,6 +1303,15 @@ button:focus-visible,
 nav button:focus-visible {
   outline: 2px solid var(--green);
   outline-offset: 2px;
+}
+
+@media (pointer: coarse) {
+  .priority-chip button,
+  .priority-row button,
+  .selected-friends button {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 .banner.disconnected {

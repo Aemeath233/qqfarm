@@ -96,10 +96,11 @@ def test_duplicate_mutation_is_never_sent_twice(panel):
     service, client = panel
     authenticate(client)
     service.manual = AsyncMock()
+    service.client = SimpleNamespace(closed=False, fault=None, close=AsyncMock())
     headers = {**HEADERS, "Idempotency-Key": "one-unique-click"}
     value = {"task_id": 200001}
     assert client.post("/api/tasks/claim", headers=headers, json=value).status_code == 200
-    assert client.post("/api/tasks/claim", headers=headers, json=value).status_code == 409
+    assert client.post("/api/tasks/claim", headers=headers, json=value).json()["replayed"]
     service.manual.assert_awaited_once()
 
 
@@ -317,7 +318,7 @@ async def test_friend_insect_reply_without_lands_uses_read_only_verification(tmp
         service.audit.close()
 
 
-async def test_friend_insect_unconfirmed_after_revisit_pauses_only_that_kind(tmp_path):
+async def test_friend_insect_unconfirmed_after_revisit_skips_without_retry(tmp_path):
     service = FarmService(tmp_path)
     service.friends = [{"id": 12345}]
 
@@ -332,13 +333,13 @@ async def test_friend_insect_unconfirmed_after_revisit_pauses_only_that_kind(tmp
         rpc=AsyncMock(side_effect=rpc),
     )
     try:
-        with pytest.raises(FriendInteractionPaused, match="已暂停放虫"):
-            await service.friend_locked("insects", 12345)
+        await service.friend_locked("insects", 12345)
+        await service.friend_locked("insects", 12345)
         assert [call.args[1] for call in service.client.rpc.await_args_list].count(
             "PutInsects"
         ) == 1
         assert service.metrics["friend_actions"] == 0
-        assert "insects" in service.friend_stats.blocks(service.audit.account, 1000)
+        assert "insects" not in service.friend_stats.blocks(service.audit.account, 1000)
     finally:
         service.audit.close()
 

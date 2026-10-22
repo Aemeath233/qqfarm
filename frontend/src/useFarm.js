@@ -63,6 +63,7 @@ export function useFarm() {
   const pausing = ref(false);
   const authed = ref(false),
     password = ref(""),
+    showPassword = ref(false),
     busy = ref(false),
     page = ref("overview");
   const notice = ref(""),
@@ -482,6 +483,7 @@ export function useFarm() {
     pause,
     authed,
     password,
+    showPassword,
     busy,
     page,
     notice,

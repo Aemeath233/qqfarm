@@ -139,7 +139,7 @@ def test_next_check_uses_maturity_after_fertilizer(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("exception", [FarmError("constructor failed"), asyncio.CancelledError()])
-async def test_login_constructor_failure_releases_session_and_account_lock(
+async def test_login_constructor_failure_preserves_existing_farm_state(
     tmp_path, monkeypatch, exception
 ):
     service = FarmService(tmp_path)
@@ -152,7 +152,7 @@ async def test_login_constructor_failure_releases_session_and_account_lock(
         with pytest.raises(type(exception)):
             await service.login({"code": "test", "version": "test"})
         assert service.session is None and service.client is None and service.lock is None
-        assert not service.rows and service.metrics["planted"] == 0
+        assert 1 in service.rows and service.metrics["planted"] == 5
         with InstanceLock(tmp_path / "account.lock"):
             pass
     finally:

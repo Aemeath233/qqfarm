@@ -3,6 +3,7 @@ import { useFarm } from "./useFarm";
 const {
   authed,
   password,
+  showPassword,
   busy,
   pausing,
   page,
@@ -66,14 +67,23 @@ const {
       <div class="brand-mark">农</div>
       <h1>农场管家</h1>
       <p class="muted">登录你的个人控制台，让农场持续生长。</p>
-      <label
-        >管理密码<input
+      <label for="admin-password">管理密码</label>
+      <div class="password-field">
+        <input
+          id="admin-password"
           v-model="password"
-          type="password"
+          :type="showPassword ? 'text' : 'password'"
           autocomplete="current-password"
           required
-          placeholder="输入管理密码" /></label
-      ><button class="primary" :disabled="busy">
+          placeholder="输入管理密码"
+        />
+        <button
+          type="button"
+          :aria-label="showPassword ? '隐藏密码' : '显示密码'"
+          @click="showPassword = !showPassword"
+        >{{ showPassword ? "隐藏" : "显示" }}</button>
+      </div>
+      <button class="primary" :disabled="busy">
         {{ busy ? "正在登录…" : "登录控制台 →" }}
       </button>
       <p v-if="notice || connectionError" class="form-error">
@@ -86,7 +96,7 @@ const {
         @click="load"
       >
         重试读取状态</button
-      ><small>首次密码保存在程序数据目录的 initial-password.txt</small>
+      ><small>首次密码在部署机器的数据目录的 initial-password.txt。浏览器自动填充不对时，请清空后重新粘贴。</small>
     </form>
   </main>
   <div v-else-if="data" class="shell">
@@ -552,7 +562,7 @@ const {
               </tbody>
             </table>
           </div>
-          <p v-else class="compact-empty">今天尚无成功互动记录</p>
+          <p v-else class="compact-empty">{{ ready ? "今天尚无成功互动记录" : "连接农场后显示本账号今日互动" }}</p>
         </section>
         <section class="panel">
           <div class="panel-heading">
@@ -594,7 +604,7 @@ const {
               </div>
               <p v-else-if="data.friend_notes?.[kind]" class="quota">{{ data.friend_notes[kind] }}</p>
               <div
-                v-if="data.friend_quota?.[kind]"
+                v-if="ready && data.friend_quota?.[kind]"
                 class="quota-status"
                 :class="{ finished: data.friend_quota[kind].remaining === 0 }"
               >
@@ -612,6 +622,9 @@ const {
                   </template>
                 </span>
               </div>
+              <p v-else-if="kind === 'insects' || kind === 'weeds'" class="quota">
+                连接农场后显示今日额度
+              </p>
               <div class="selected-friends">
                 <div v-for="(id, i) in draft[kind + '_priority']" :key="id">
                   <span>{{ i + 1 }}. {{ friendName(id) }}</span

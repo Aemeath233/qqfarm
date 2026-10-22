@@ -2,7 +2,7 @@ import math
 import random
 
 from qqfarm import catalog, models, wire
-from qqfarm.client import ITEM, PLANT, SHOP
+from qqfarm.client import ITEM, PLANT, SHOP, UncertainOutcome
 from qqfarm.config import FarmError
 
 
@@ -187,22 +187,62 @@ class FarmEngine:
                 + wire.uint(5, 0)
             )
             result = await self.client.rpc(PLANT, "Harvest", body)
-            self.updated_batch(rows, result, mature)
-            self.audit.record(
-                "harvest_batch",
-                "confirmed",
-                plots=mature,
-                items=[models.item(value) for value in wire.parse(result).get(2, [])],
-            )
-            for land_id in mature:
-                self.audit.record(
-                    "harvest",
-                    "confirmed",
-                    land=land_id,
-                    next_status=rows[land_id].status(
+            try:
+                self.updated_batch(rows, result, mature)
+            except (FarmError, wire.ProtocolError):
+                # A successful write may omit some land states. Check once without
+                # resending Harvest, and never attribute a later change to this client.
+                self.audit.record("harvest_verification", "started", plots=mature)
+                try:
+                    latest_payload = await self.client.rpc(PLANT, "AllLands")
+                    latest_list = models.lands(latest_payload)
+                    latest = {land.id: land for land in latest_list}
+                except Exception as exc:
+                    raise UncertainOutcome(
+                        "收获回包不完整且土地复查失败；已停止，不重复收获。"
+                    ) from exc
+                if len(latest) != len(latest_list) or not set(mature).issubset(latest):
+                    raise UncertainOutcome(
+                        "收获回包不完整且复查土地缺失或重复；已停止，不重复收获。"
+                    ) from None
+                before = {land_id: rows[land_id] for land_id in mature}
+                rows.update({key: land for key, land in latest.items() if key in rows})
+                self.land_payload = latest_payload
+                unresolved = [
+                    land_id
+                    for land_id in mature
+                    if latest[land_id].plant_id == before[land_id].plant_id
+                    and latest[land_id].status(
                         self.client.server_now(), allow_shared=self.include_shared
-                    ),
+                    ) in {"mature", "unknown"}
+                ]
+                if unresolved:
+                    self.audit.record(
+                        "harvest_verification", "unknown", plots=unresolved
+                    )
+                    raise UncertainOutcome(
+                        "收获复查仍有目标未能确认；已停止，不重复收获。"
+                    ) from None
+                self.audit.record(
+                    "harvest_verification", "received", plots=mature,
+                    reason="复查确认目标已变化；不重复收获，也不计入本助手确认次数。",
                 )
+            else:
+                self.audit.record(
+                    "harvest_batch",
+                    "confirmed",
+                    plots=mature,
+                    items=[models.item(value) for value in wire.parse(result).get(2, [])],
+                )
+                for land_id in mature:
+                    self.audit.record(
+                        "harvest",
+                        "confirmed",
+                        land=land_id,
+                        next_status=rows[land_id].status(
+                            self.client.server_now(), allow_shared=self.include_shared
+                        ),
+                    )
         # 仅清理回包确认的残留；多季作物继续生长时保留。
         residue = [
             land.id

@@ -188,7 +188,6 @@ def create_app(root, *, password=None, service=None):
     root.mkdir(parents=True, exist_ok=True)
     service = service or FarmService(root)
     auth = WebAuth(root, password or os.getenv("FARM_ADMIN_PASSWORD"))
-    receipts = {}
 
     @asynccontextmanager
     async def lifecycle(_):
@@ -401,14 +400,33 @@ def create_app(root, *, password=None, service=None):
         fingerprint = hashlib.sha256(
             json.dumps([action, args], sort_keys=True).encode()
         ).hexdigest()
-        if key in receipts:
-            if receipts[key][0] != fingerprint:
-                raise HTTPException(409, "操作标识冲突")
-            raise HTTPException(409, "该操作已提交，请查看状态；不会重复发送")
-        if len(receipts) > 500:
-            receipts.pop(next(iter(receipts)))
-        receipts[key] = (fingerprint, time.time())
-        await service.manual(action, operation_id=key, **args)
+        db = service.audit.db
+        with db:
+            db.execute("DELETE FROM manual_receipts WHERE at<?", (time.time() - 30 * 86400,))
+            previous = db.execute(
+                "SELECT fingerprint,state FROM manual_receipts WHERE key=?", (key,)
+            ).fetchone()
+            if previous:
+                if previous[0] != fingerprint:
+                    raise HTTPException(409, "操作标识冲突")
+                if previous[1] == "confirmed":
+                    return {"ok": True, "replayed": True}
+                raise HTTPException(409, "该操作已提交，请先核对状态；不会重复发送")
+            service.require_client()
+            db.execute(
+                "INSERT INTO manual_receipts VALUES (?,?,?,?)",
+                (key, fingerprint, time.time(), "submitted"),
+            )
+        try:
+            await service.manual(action, operation_id=key, **args)
+        except BaseException:
+            with db:
+                db.execute(
+                    "UPDATE manual_receipts SET state='unconfirmed' WHERE key=?", (key,)
+                )
+            raise
+        with db:
+            db.execute("UPDATE manual_receipts SET state='confirmed' WHERE key=?", (key,))
         return {"ok": True}
 
     @app.post("/api/sell")
