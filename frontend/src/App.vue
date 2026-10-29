@@ -84,7 +84,7 @@ const {
         >{{ showPassword ? "隐藏" : "显示" }}</button>
       </div>
       <button class="primary" :disabled="busy">
-        {{ busy ? "正在登录…" : "登录控制台 →" }}
+        {{ busy ? "正在登录…" : "登录控制台" }}
       </button>
       <p v-if="notice || connectionError" class="form-error">
         {{ notice || connectionError }}
@@ -105,11 +105,13 @@ const {
         <span class="brand-mark">农</span>
         <div>农场管家<small>网页挂机助手</small></div>
       </div>
-      <nav>
+      <nav aria-label="主导航">
         <button
           v-for="[key, label] in nav"
           :key="key"
+          type="button"
           :class="{ active: page === key }"
+          :aria-current="page === key ? 'page' : undefined"
           @click="
             page = key;
             if (key === 'logs') load();
@@ -122,7 +124,7 @@ const {
         </button>
       </nav>
       <div class="side-bottom">
-        <div class="status-dot" :class="{ live: ready }"></div>
+        <div class="status-dot" :class="{ live: ready }" aria-hidden="true"></div>
         {{ ready ? "农场连接正常" : "等待农场授权"
         }}<small>{{ data.running ? '关闭网页不影响运行，请保持程序运行' : ready ? '当前未挂机，等待开始' : '农场连接已断开，请重新授权' }}</small
         ><button class="text-button" @click="logout">退出面板</button>
@@ -140,9 +142,7 @@ const {
             accept=".saz,application/zip"
             hidden
             @change="importSaz"
-          /><button :disabled="busy" @click="authFile.click()">
-            导入 Fiddler SAZ</button
-          ><button
+          /><button
             :disabled="busy || !ready"
             @click="
               run(
@@ -154,57 +154,34 @@ const {
               )
             "
           >
-            刷新状态</button
-          ><button
-            v-if="!data.running"
-            class="primary"
-            :disabled="busy || !ready"
-            @click="start"
-          >
-            {{ changed ? "保存并开始挂机" : "开始挂机" }}</button
-          ><button
-            v-if="data.running || operations.length"
-            class="danger"
-            :disabled="pausing || !ready"
-            @click="pause"
-          >
-            {{ pausing ? "正在暂停…" : "暂停操作" }}
-          </button>
+            刷新数据</button>
           <button class="toolbar-logout" :disabled="busy" @click="logout">
             退出面板
           </button>
         </div>
       </header>
-      <div class="banner" :class="{ disconnected: !ready }">
-        <div>
-          {{ data.note
-          }}<small>{{
-            data.running
-              ? "挂机进行中；关闭网页后程序仍需保持运行。"
-              : ready
-                ? "农场已连接，点击“开始挂机”才会自动种收。"
-                : "农场未连接；导入刚登录时抓取的 SAZ 后，再点击“开始挂机”。"
-          }}</small>
+      <section class="farm-status" :class="{ disconnected: !ready, compact: page !== 'overview' }">
+        <span class="farm-status-marker" aria-hidden="true"></span>
+        <div class="farm-status-copy">
+          <h2 aria-live="polite">{{ !ready ? "需要重新授权" : data.running ? "农场正在自动运行" : "农场已连接" }}</h2>
+          <p>{{ !ready
+            ? "用 Fiddler 抓取一次成功登录，5 分钟内导出 SAZ 并上传。"
+            : data.running
+              ? "按成熟时间自动检查。关闭网页后，服务器程序仍需保持运行。"
+              : "连接正常，点击开始挂机后才会自动种收。" }}</p>
+          <small v-if="data.note">{{ data.note }}</small>
         </div>
-        <span v-if="data.heartbeat?.acknowledged" class="tag">心跳正常</span>
-      </div>
-      <div v-if="!data.running" class="next-step">
-        <span class="step-index">下一步</span>
-        <div v-if="!ready">
-          <b>重新授权农场</b>
-          <small>在 Fiddler 抓取一次成功登录，5 分钟内导出 SAZ 并上传。</small>
+        <div class="farm-status-actions">
+          <span v-if="data.heartbeat?.acknowledged && ready" class="heartbeat-label">心跳正常</span>
+          <button :disabled="busy" @click="authFile.click()">导入 SAZ</button>
+          <button v-if="!data.running && ready" class="primary" :disabled="busy" @click="start">
+            {{ changed ? "保存并开始" : "开始挂机" }}
+          </button>
+          <button v-if="data.running || operations.length" class="danger" :disabled="pausing || !ready" @click="pause">
+            {{ pausing ? "正在暂停…" : "暂停操作" }}
+          </button>
         </div>
-        <div v-else>
-          <b>开始自动种收</b>
-          <small>连接和心跳已验证；开始后按种植计划自动运行。</small>
-        </div>
-        <button v-if="!ready" :disabled="busy" @click="authFile.click()">
-          导入 SAZ
-        </button>
-        <button v-else class="primary" :disabled="busy" @click="start">
-          {{ changed ? "保存并开始" : "开始挂机" }}
-        </button>
-      </div>
+      </section>
       <div v-if="connectionError" class="notice error" role="alert">
         {{ connectionError
         }}<button :disabled="busy" @click="load">重试读取状态</button>
@@ -222,9 +199,9 @@ const {
         >
       </div>
       <div v-if="notice" class="notice" :class="{ error }" role="status">
-        {{ notice }}<button @click="notice = ''">×</button>
+        {{ notice }}<button type="button" aria-label="关闭提示" @click="notice = ''">×</button>
       </div>
-      <div v-if="page === 'overview'" class="metrics">
+      <div v-if="page === 'overview' && (data.lands.length || data.seeds.length)" class="metrics" aria-label="农场摘要">
         <article>
           <span>{{ snapshotFresh ? "当前账号" : "上次连接账号" }}</span
           ><strong>{{ data.player.name || "待授权" }}</strong
@@ -261,7 +238,7 @@ const {
             })
           }}。断线期间的变化需重新授权后确认。
         </div>
-        <div class="overview-grid">
+        <div v-if="data.lands.length || data.seeds.length" class="overview-grid">
           <section class="panel">
             <div class="panel-heading">
               <div>
@@ -410,7 +387,7 @@ const {
               保存种植计划
             </button>
           </div>
-          <div class="priority-strip">
+          <div v-if="data.seeds.length" class="priority-strip">
             <span>种植顺序</span>
             <div
               v-for="(id, i) in draft.seed_priority"
@@ -450,7 +427,7 @@ const {
                 : "未选择植物：收获已有作物，保留空地。"
             }}</span>
           </div>
-          <div class="plant-filters">
+          <div v-if="data.seeds.length" class="plant-filters">
             <div class="search-box">
               <input
                 v-model="search"
@@ -473,7 +450,7 @@ const {
               ><input v-model="showLocked" type="checkbox" />显示未解锁</label
             ><span class="muted">{{ visiblePlants.length }} 种</span>
           </div>
-          <div class="plant-grid">
+          <div v-if="data.seeds.length" class="plant-grid">
             <button
               v-for="plant in visiblePlants"
               :key="plant.seed_id + ':' + plant.goods_id"
@@ -508,14 +485,9 @@ const {
               </span>
             </button>
           </div>
-          <p v-if="!visiblePlants.length" class="empty">
-            {{
-              data.seeds.length
-                ? "没有符合筛选条件的植物"
-                : "连接农场后显示可用植物"
-            }}
-          </p>
-          <p class="footnote">
+          <p v-if="!data.seeds.length" class="empty">连接农场后显示可用植物和当前种植顺序</p>
+          <p v-else-if="!visiblePlants.length" class="empty">没有符合筛选条件的植物</p>
+          <p v-if="data.seeds.length" class="footnote">
             加入优先级只修改计划，点击保存后生效，不会立即购买或播种。实际成熟时间以农场状态为准。
           </p>
         </section>
@@ -630,6 +602,7 @@ const {
                   <span>{{ i + 1 }}. {{ friendName(id) }}</span
                   ><button
                     :disabled="busy || i === 0"
+                    :aria-label="friendName(id) + '在' + label + '名单中上移'"
                     title="上移"
                     @click="reorder(draft[kind + '_priority'], i, -1)"
                   >
@@ -638,6 +611,7 @@ const {
                     :disabled="
                       busy || i === draft[kind + '_priority'].length - 1
                     "
+                    :aria-label="friendName(id) + '在' + label + '名单中下移'"
                     title="下移"
                     @click="reorder(draft[kind + '_priority'], i, 1)"
                   >
@@ -725,6 +699,7 @@ const {
                   <td v-for="[kind, label] in actions" :key="kind">
                     <button
                       :disabled="busy"
+                      :aria-label="(draft[kind + '_priority'].includes(friend.id) ? '从' + label + '名单移除：' : '加入' + label + '名单：') + (friend.remark || friend.name)"
                       :class="{
                         selected: draft[kind + '_priority'].includes(friend.id),
                       }"
@@ -796,6 +771,7 @@ const {
                 <input
                   v-model.number="sellCounts[inventoryKey(item)]"
                   :disabled="busy"
+                  :aria-label="item.name + '出售数量'"
                   type="number"
                   min="1"
                   :max="item.count"
@@ -803,7 +779,7 @@ const {
                 />
               </td>
               <td>
-                <button :disabled="busy || !ready" @click="sell(item)">
+                <button :disabled="busy || !ready" :aria-label="'出售' + item.name" @click="sell(item)">
                   出售
                 </button>
               </td>
@@ -847,7 +823,6 @@ const {
           保存任务策略
         </button>
         <article v-for="task in data.tasks" :key="task.id" class="task-row">
-          <span class="task-icon">{{ task.type === 2 ? "✓" : "↗" }}</span>
           <div>
             <b>{{ task.description || "任务 " + task.id }}</b
             ><small
