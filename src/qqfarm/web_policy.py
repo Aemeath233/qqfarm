@@ -2,6 +2,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# Keep routine farm timing consistent across new and previously saved policies.
+SIMPLE_FARM_DEFAULTS = {
+    "max_lands": 24,
+    "action_delay_min": 1,
+    "action_delay_max": 3,
+    "maturity_grace_seconds": 5,
+}
+
 
 class Policy(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -19,7 +27,7 @@ class Policy(BaseModel):
     action_delay_min: float = Field(default=1, ge=1, le=10)
     action_delay_max: float = Field(default=3, ge=1, le=10)
     random_plant_order: bool = True
-    maturity_grace_seconds: int = Field(default=60, ge=0, le=3600)
+    maturity_grace_seconds: int = Field(default=5, ge=0, le=3600)
     friend_help: bool = False
     friend_steal: bool = False
     friend_insects: bool = False
@@ -41,6 +49,11 @@ class Policy(BaseModel):
         if self.friend_action_delay_min > self.friend_action_delay_max:
             raise ValueError("好友操作等待下限不能超过上限")
         return self
+
+    def with_simple_farm_defaults(self):
+        # Retain the old JSON fields for compatibility, but no longer expose
+        # these routine tuning values as user settings.
+        return self.model_copy(update=SIMPLE_FARM_DEFAULTS)
 
     @field_validator(
         "seed_priority", "help_priority", "steal_priority", "insects_priority", "weeds_priority"

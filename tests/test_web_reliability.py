@@ -34,15 +34,29 @@ def plot(identifier, mature_at=None):
 
 
 def test_old_mail_setting_is_retired_without_losing_the_saved_plan(tmp_path):
-    stored = Policy(seed_priority=[20003], maturity_grace_seconds=5).model_dump()
+    stored = Policy(
+        seed_priority=[20003],
+        max_lands=8,
+        action_delay_min=2,
+        action_delay_max=4,
+        maturity_grace_seconds=60,
+    ).model_dump()
     stored["auto_mail"] = True
     (tmp_path / "policy.json").write_text(json.dumps(stored))
     service = FarmService(tmp_path)
     try:
         assert service.policy.seed_priority == [20003]
+        assert service.policy.max_lands == 24
+        assert service.policy.action_delay_min == 1
+        assert service.policy.action_delay_max == 3
         assert service.policy.maturity_grace_seconds == 5
         assert "auto_mail" not in service.policy.model_dump()
-        assert Policy().maturity_grace_seconds == 60
+        assert Policy().maturity_grace_seconds == 5
+        service.save_policy(Policy(seed_priority=[20003], max_lands=6, maturity_grace_seconds=30))
+        saved = json.loads((tmp_path / "policy.json").read_text())
+        assert saved["seed_priority"] == [20003]
+        assert saved["max_lands"] == 24
+        assert saved["maturity_grace_seconds"] == 5
     finally:
         service.audit.close()
 

@@ -864,6 +864,7 @@ const {
         <div class="settings-grid">
           <section class="panel settings-panel">
             <h2>种植与自动操作</h2>
+            <p class="muted">自动管理当前已解锁的全部土地。</p>
             <div class="setting-row">
               <div>
                 <b>购种方式</b><small>按优先级选择，买不起时继续下一种。</small>
@@ -892,16 +893,6 @@ const {
                 aria-label="白萝卜回退"
                 v-model="draft.fallback_radish"
                 type="checkbox"
-              />
-            </div>
-            <div class="setting-row">
-              <b>最多操作土地数</b
-              ><input
-                aria-label="最多操作土地数"
-                v-model.number="draft.max_lands"
-                type="number"
-                min="1"
-                max="24"
               />
             </div>
             <div class="setting-row">
@@ -942,7 +933,7 @@ const {
             <div class="setting-row">
               <div>
                 <b>操作前随机等待</b
-                ><small>心跳独立运行，暂停可中断等待。</small>
+                ><small>开启后每次随机等待 1～3 秒；心跳独立运行。</small>
               </div>
               <input
                 aria-label="操作前随机等待"
@@ -951,41 +942,10 @@ const {
               />
             </div>
             <div class="setting-row">
-              <b>等待下限（秒）</b
-              ><input
-                aria-label="等待下限秒"
-                v-model.number="draft.action_delay_min"
-                :disabled="!draft.random_action_delays"
-                type="number"
-                min="1"
-                max="10"
-                step="0.5"
-              />
-            </div>
-            <div class="setting-row">
-              <b>等待上限（秒）</b
-              ><input
-                aria-label="等待上限秒"
-                v-model.number="draft.action_delay_max"
-                :disabled="!draft.random_action_delays"
-                type="number"
-                min="1"
-                max="10"
-                step="0.5"
-              />
-            </div>
-            <div class="setting-row">
               <div>
-                <b>成熟后检查延迟（秒）</b
-                ><small>默认 60 秒；每块地按实际成熟时间安排。</small>
+                <b>成熟后复查</b
+                ><small>预计成熟后 5 秒检查；每块地按实际成熟时间安排。</small>
               </div>
-              <input
-                aria-label="成熟后检查延迟秒"
-                v-model.number="draft.maturity_grace_seconds"
-                type="number"
-                min="0"
-                max="3600"
-              />
             </div>
             <div class="setting-row">
               <b>随机播种顺序</b

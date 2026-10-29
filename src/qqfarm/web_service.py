@@ -114,7 +114,7 @@ class FarmService:
         stored_policy = json.loads(policy.read_text()) if policy.exists() else {}
         # Mail support was retired in 0.6.1; retain every other saved setting.
         stored_policy.pop("auto_mail", None)
-        self.policy = Policy.model_validate(stored_policy)
+        self.policy = Policy.model_validate(stored_policy).with_simple_farm_defaults()
         key = self.root / "session-key"
         if not key.exists():
             key.write_bytes(Fernet.generate_key())
@@ -314,6 +314,7 @@ class FarmService:
         }
 
     def save_policy(self, value):
+        value = value.with_simple_farm_defaults()
         selected = {p["seed_id"] for p in self.seeds}
         if selected and not set(value.seed_priority).issubset(selected):
             raise FarmError("种植优先级包含当前商店未提供的种子。")
